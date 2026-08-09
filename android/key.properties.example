@@ -1,0 +1,8 @@
+# Copy this file to android/key.properties (gitignored) and fill in the
+# real values after generating the upload keystore -- see the Play Store
+# release steps for the exact `keytool` command. Never commit the real
+# key.properties or the .jks file it points at.
+storePassword=REPLACE_ME
+keyPassword=REPLACE_ME
+keyAlias=upload
+storeFile=upload-keystore.jks

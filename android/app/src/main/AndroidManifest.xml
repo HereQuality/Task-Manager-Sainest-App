@@ -1,0 +1,122 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Required for every API call this app makes (dio). The Flutter
+         template only puts this in the debug/profile manifests (needed
+         there for hot reload's own debug connection); release builds
+         merge from this file alone, so without it here a release APK/AAB
+         has no network access at all. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Android 13+ requires this to show any notification at all -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- For background_watcher_service.dart's persistent foreground
+         service (the fallback that polls this app's own backend for
+         overdue tasks once AlarmManager-based scheduling proved
+         unreliable on some OEMs). FOREGROUND_SERVICE_DATA_SYNC + the
+         matching foregroundServiceType override below are required on
+         Android 14+. Omitting either makes startForeground() throw
+         MissingForegroundServiceTypeException at runtime. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- Exact-time firing for the overdue-task alarm and due-soon reminders
+         (inexact scheduling could drift by minutes/hours, defeating the
+         point of "ring the moment this becomes overdue") -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+    <!-- Re-arms scheduled alarms after a device reboot, since Android
+         clears them otherwise -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- Lets the overdue-task notification launch the app full-screen,
+         on top of the lock screen, like a real alarm clock. See
+         NotificationService's overdue channel (fullScreenIntent: true).
+         On Android 14+ this can be revoked in Settings if the OS decides
+         the app is over-using it; there's no in-app way to force-grant
+         it back, only guide the person to that settings screen. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <!-- Lets the app ask to be exempted from Doze/App Standby battery
+         optimization, so the OS doesn't defer or drop the overdue alarm
+         while the app is closed. Requested (not silently applied) via
+         Settings screen's "Allow background alarms" button. See
+         notification_service.dart's requestBatteryOptimizationExemption. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <application
+        android:label="Q Task360"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+        <!-- flutter_background_service's own manifest declares this
+             <service> without a foregroundServiceType, which crashes at
+             startForeground() on Android 14+ (targetSdk 34+) unless one
+             is declared here too. tools:node="merge" adds the attribute
+             on top of the library's version instead of replacing the
+             whole element. -->
+        <service
+            android:name="id.flutter.flutter_background_service.BackgroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
+        <!-- android_alarm_manager_plus: the watchdog alarm that periodically
+             checks whether the overdue-alarm foreground service above is
+             still alive and restarts it if not (see
+             background_watcher_service.dart's armWatchdog/
+             _watchdogCallback). This runs through Android's AlarmManager,
+             a completely separate OS subsystem from the foreground
+             service's own process, so it keeps working even after that
+             service itself has been killed outright. -->
+        <service
+            android:name="dev.fluttercommunity.plus.androidalarmmanager.AlarmService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <receiver
+            android:name="dev.fluttercommunity.plus.androidalarmmanager.AlarmBroadcastReceiver"
+            android:exported="false" />
+        <receiver
+            android:name="dev.fluttercommunity.plus.androidalarmmanager.RebootBroadcastReceiver"
+            android:enabled="false"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

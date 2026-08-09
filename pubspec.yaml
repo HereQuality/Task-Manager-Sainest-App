@@ -1,0 +1,72 @@
+name: hqepl_mobile
+description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+
+  # Networking
+  dio: ^5.4.3
+
+  # State management
+  flutter_riverpod: ^2.5.1
+
+  # Routing
+  go_router: ^14.2.0
+
+  # Secure token storage
+  flutter_secure_storage: ^9.2.2
+
+  # Utilities
+  intl: ^0.19.0
+  cached_network_image: ^3.3.1
+  table_calendar: ^3.1.2
+  google_fonts: ^6.2.1
+  shared_preferences: ^2.2.3
+  flutter_local_notifications: ^17.2.2
+  timezone: ^0.9.4
+  permission_handler: ^11.3.1
+  android_intent_plus: ^5.1.0
+  flutter_background_service: ^5.1.0
+  # Independent OS-level watchdog for the overdue alarm (see
+  # background_watcher_service.dart's _armWatchdog): AlarmManager runs
+  # this on its own schedule, entirely separate from the foreground
+  # service's own process lifetime, so it can detect and restart that
+  # service even after Android has killed it outright.
+  android_alarm_manager_plus: ^4.0.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/app_logo.png
+    - assets/images/app_logo_icon.png
+    - assets/images/app_logo_adaptive_fg.png
+
+# Generates the native Android/iOS launcher (home-screen) icon from the
+# same brand mark used on the splash screen -- run
+# `dart run flutter_launcher_icons` after editing this. adaptive_icon_*
+# gives Android a proper adaptive icon (mark on a white disc) instead of
+# letterboxing the whole square image, which would otherwise crop badly
+# on circular/rounded-square launcher masks.
+flutter_launcher_icons:
+  android: true
+  ios: true
+  remove_alpha_ios: true # App Store rejects icons with transparency
+  # Padded variants (see tool/pad_logo.dart) -- the raw app_logo.png
+  # fills its canvas edge-to-edge, which crops badly once Android's
+  # adaptive-icon mask (circle/rounded-square/squircle) is applied.
+  image_path: "assets/images/app_logo_icon.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/images/app_logo_adaptive_fg.png"
