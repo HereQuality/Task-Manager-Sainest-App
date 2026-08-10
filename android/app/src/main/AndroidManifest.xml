@@ -21,7 +21,6 @@
          (inexact scheduling could drift by minutes/hours, defeating the
          point of "ring the moment this becomes overdue") -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
     <!-- Re-arms scheduled alarms after a device reboot, since Android
          clears them otherwise -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
