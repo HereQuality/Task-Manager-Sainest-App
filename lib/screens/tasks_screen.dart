@@ -90,6 +90,24 @@ String? _refId(dynamic v) {
 
 String? _refName(dynamic v, String nameKey) => v is Map ? v[nameKey]?.toString() : null;
 
+// One row in the grouped task list -- either a collapsible section header
+// (TO DO/IN PROGRESS/OVERDUE/COMPLETE/COMPLETE (LATE), each with its own
+// arrow toggle) or a task belonging to whichever header preceded it.
+class _TaskListEntry {
+  final String? headerKey;
+  final String? headerLabel;
+  final int? headerCount;
+  final Map<String, dynamic>? task;
+
+  const _TaskListEntry.header(this.headerKey, this.headerLabel, this.headerCount) : task = null;
+  const _TaskListEntry.task(this.task)
+      : headerKey = null,
+        headerLabel = null,
+        headerCount = null;
+
+  bool get isHeader => task == null;
+}
+
 class TasksScreen extends ConsumerStatefulWidget {
   const TasksScreen({super.key});
 
@@ -111,6 +129,12 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   DateTime? _dueFrom;
   DateTime? _dueTo;
   bool _noDueDateOnly = false;
+  // Which status groups (by _statusOrder key) are collapsed -- empty by
+  // default, i.e. every group starts expanded. Tapping a group's header
+  // (the chevron row) toggles it, same collapsible-section pattern as
+  // TO DO/IN PROGRESS/OVERDUE/COMPLETE/COMPLETE (LATE) each being their
+  // own foldable block instead of one long flat list.
+  final Set<String> _collapsedGroups = {};
 
   @override
   void dispose() {
@@ -321,13 +345,21 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             // OVERDUE), completed work last (on-time COMPLETE, then
             // COMPLETE (LATE)) -- rather than just "incomplete vs.
             // complete", so e.g. an overdue task never gets buried among
-            // plain in-progress ones. Split-then-concatenate (rather than
-            // tasks.sort(...) with a single comparator) keeps this
-            // explicit and each group individually sorted by due date.
-            final orderedTasks = [
-              for (final key in _statusOrder)
-                ...(tasks.where((t) => _effectiveStatus(t) == key).toList()..sort(_compareByDueDate)),
-            ];
+            // plain in-progress ones. Each group renders as its own
+            // collapsible section (tap the header to open/close it, same
+            // arrow-toggle behavior for every group), rather than one flat
+            // list -- empty groups are skipped entirely instead of
+            // showing an empty section.
+            final entries = <_TaskListEntry>[];
+            for (final key in _statusOrder) {
+              final group = tasks.where((t) => _effectiveStatus(t) == key).toList()..sort(_compareByDueDate);
+              if (group.isEmpty) continue;
+              final label = _statusFacetOptions.firstWhere((o) => o.$1 == key, orElse: () => (key, key)).$2;
+              entries.add(_TaskListEntry.header(key, label, group.length));
+              if (!_collapsedGroups.contains(key)) {
+                entries.addAll(group.map(_TaskListEntry.task));
+              }
+            }
 
             return Column(
               children: [
@@ -480,7 +512,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                   ),
                 ),
                 Expanded(
-                  child: orderedTasks.isEmpty
+                  child: entries.isEmpty
                       ? EmptyState(
                           icon: Icons.checklist_rounded,
                           title: 'No tasks here',
@@ -488,12 +520,52 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                               ? 'Nothing matches your search/filters right now.'
                               : 'Nothing matches this filter right now.',
                         )
-                      : ListView.separated(
+                      : ListView.builder(
                           padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, Gap.xl),
-                          itemCount: orderedTasks.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: Gap.sm),
+                          itemCount: entries.length,
                           itemBuilder: (context, i) {
-                            final t = orderedTasks[i];
+                            final entry = entries[i];
+
+                            if (entry.isHeader) {
+                              final collapsed = _collapsedGroups.contains(entry.headerKey);
+                              return Padding(
+                                padding: EdgeInsets.only(top: i == 0 ? 0 : Gap.md, bottom: Gap.sm),
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(AppRadius.field),
+                                  onTap: () => setState(() {
+                                    if (collapsed) {
+                                      _collapsedGroups.remove(entry.headerKey);
+                                    } else {
+                                      _collapsedGroups.add(entry.headerKey!);
+                                    }
+                                  }),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: Gap.xs),
+                                    child: Row(
+                                      children: [
+                                        AnimatedRotation(
+                                          turns: collapsed ? -0.25 : 0,
+                                          duration: const Duration(milliseconds: 150),
+                                          child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.inkMuted),
+                                        ),
+                                        const SizedBox(width: Gap.xs),
+                                        Text(
+                                          entry.headerLabel!,
+                                          style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                                        ),
+                                        const SizedBox(width: Gap.sm),
+                                        Text(
+                                          '${entry.headerCount}',
+                                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.inkMuted),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+
+                            final t = entry.task!;
                             final due = t['dueDate'];
                             final spaceName = t['spaceName']?.toString();
                             final assigneeName = _refName(t['assigneeId'], 'employeeName');
@@ -508,12 +580,15 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                               if (spaceName != null && spaceName.isNotEmpty) spaceName,
                               if (assigneeName != null && assigneeName.isNotEmpty) assigneeName,
                             ];
-                            return EntityCard(
-                              title: t['title'] ?? t['name'] ?? 'Untitled task',
-                              status: _displayStatus(t),
-                              leadingIcon: Icons.task_alt_rounded,
-                              subtitle: subtitleParts.join(' · '),
-                              onTap: () => context.push('/home/tasks/${t['_id']}'),
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: Gap.sm),
+                              child: EntityCard(
+                                title: t['title'] ?? t['name'] ?? 'Untitled task',
+                                status: _displayStatus(t),
+                                leadingIcon: Icons.task_alt_rounded,
+                                subtitle: subtitleParts.join(' · '),
+                                onTap: () => context.push('/home/tasks/${t['_id']}'),
+                              ),
                             );
                           },
                         ),
