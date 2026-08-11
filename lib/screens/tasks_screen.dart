@@ -347,16 +347,16 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             // complete", so e.g. an overdue task never gets buried among
             // plain in-progress ones. Each group renders as its own
             // collapsible section (tap the header to open/close it, same
-            // arrow-toggle behavior for every group), rather than one flat
-            // list -- empty groups are skipped entirely instead of
-            // showing an empty section.
+            // arrow-toggle behavior for every group) -- every group header
+            // always shows, with a "0" count when there's nothing in it,
+            // so the full set of stages stays visible instead of the
+            // section disappearing.
             final entries = <_TaskListEntry>[];
             for (final key in _statusOrder) {
               final group = tasks.where((t) => _effectiveStatus(t) == key).toList()..sort(_compareByDueDate);
-              if (group.isEmpty) continue;
               final label = _statusFacetOptions.firstWhere((o) => o.$1 == key, orElse: () => (key, key)).$2;
               entries.add(_TaskListEntry.header(key, label, group.length));
-              if (!_collapsedGroups.contains(key)) {
+              if (group.isNotEmpty && !_collapsedGroups.contains(key)) {
                 entries.addAll(group.map(_TaskListEntry.task));
               }
             }

@@ -76,5 +76,7 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>This app needs access to the local network to discover and connect to alarm devices.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Allow access to your photos to attach a screenshot to a support ticket.</string>
 </dict>
 </plist>

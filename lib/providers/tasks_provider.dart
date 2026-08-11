@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api_client.dart';
 import 'auth_provider.dart';
@@ -5,9 +6,19 @@ import 'auth_provider.dart';
 /// Every task assigned to the logged-in user, across every Space --
 /// GET /api/v1/tasks/mine/all (same endpoint the web Calendar page uses).
 final myTasksProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
-  final res = await ApiClient.instance.dio.get('/tasks/mine/all');
-  final data = res.data['data'] ?? res.data['tasks'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  try {
+    final res = await ApiClient.instance.dio.get('/tasks/mine/all');
+    final data = res.data['data'] ?? res.data['tasks'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  } on DioException catch (e) {
+    // 403 -- this account isn't authorized to list tasks this way (role/
+    // permission gate on the backend), not "no tasks exist". Treated the
+    // same as empty rather than surfacing a raw permissions error --
+    // notificationsFeedProvider watches this too, so an uncaught 403 here
+    // would otherwise take down the whole Notifications screen as well.
+    if (e.response?.statusCode == 403) return [];
+    rethrow;
+  }
 });
 
 // Scoped explicitly to the logged-in user's own id -- sending no
@@ -39,9 +50,15 @@ Future<void> updateTaskStatus(String taskId, String status) async {
 /// ProviderScope to watch one through -- see notifications_provider.dart
 /// and that file for the two places this gets called from.
 Future<List<Map<String, dynamic>>> fetchTeamOverdueEscalations() async {
-  final res = await ApiClient.instance.dio.get('/tasks/team/overdue-escalations');
-  final data = res.data['data'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  try {
+    final res = await ApiClient.instance.dio.get('/tasks/team/overdue-escalations');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  } on DioException catch (e) {
+    // See myTasksProvider's own catch above -- same reasoning.
+    if (e.response?.statusCode == 403) return [];
+    rethrow;
+  }
 }
 
 /// A delegator's own pending "please approve this completion" requests --
@@ -51,9 +68,15 @@ Future<List<Map<String, dynamic>>> fetchTeamOverdueEscalations() async {
 /// phone -- same "plain function, not a provider" reasoning as
 /// fetchTeamOverdueEscalations.
 Future<List<Map<String, dynamic>>> fetchPendingApprovals() async {
-  final res = await ApiClient.instance.dio.get('/tasks/pending-approvals');
-  final data = res.data['data'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  try {
+    final res = await ApiClient.instance.dio.get('/tasks/pending-approvals');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  } on DioException catch (e) {
+    // See myTasksProvider's own catch above -- same reasoning.
+    if (e.response?.statusCode == 403) return [];
+    rethrow;
+  }
 }
 
 /// A single task, full detail -- GET /api/v1/tasks/:id (same endpoint

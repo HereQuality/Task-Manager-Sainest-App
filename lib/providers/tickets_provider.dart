@@ -14,9 +14,18 @@ const kTicketStatuses = ['Pending', 'In Progress', 'Confirmation', 'Closed'];
 /// didn't raise themselves is the client-side signal that they hold the
 /// Support desk's Full Access role -- see _isOwner in tickets_screen.dart.
 final ticketsProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
-  final res = await ApiClient.instance.dio.get('/tickets');
-  final data = res.data['data'] ?? res.data['tickets'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  try {
+    final res = await ApiClient.instance.dio.get('/tickets');
+    final data = res.data['data'] ?? res.data['tickets'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  } on DioException catch (e) {
+    // 403 -- this account isn't authorized to list tickets (role/permission
+    // gate on the backend, not "no tickets exist"). Treated the same as
+    // empty rather than surfacing a raw permissions error, since there's
+    // nothing actionable for the person to do about it from here.
+    if (e.response?.statusCode == 403) return [];
+    rethrow;
+  }
 });
 
 /// A single ticket, full detail (including its comment thread) -- GET
