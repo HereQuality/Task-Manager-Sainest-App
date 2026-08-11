@@ -55,7 +55,20 @@ Future<void> createTicket({
       'description': description,
       'screenshot': await MultipartFile.fromFile(screenshotPath),
     });
-    await ApiClient.instance.dio.post('/tickets', data: formData);
+    // ApiClient's Dio instance carries a blanket 'Content-Type:
+    // application/json' header (see api_client.dart) for every other
+    // endpoint in the app, which all send plain JSON bodies. Dio treats
+    // an explicit Content-Type header as authoritative and won't
+    // override it for FormData, so without forcing multipart/form-data
+    // here, this request would go out with a JSON content-type but a
+    // multipart body -- multer never sees a boundary, silently drops
+    // every field (including the required subject/platform/priority),
+    // and the server 400s.
+    await ApiClient.instance.dio.post(
+      '/tickets',
+      data: formData,
+      options: Options(contentType: 'multipart/form-data'),
+    );
   } else {
     await ApiClient.instance.dio.post('/tickets', data: {
       'subject': subject,

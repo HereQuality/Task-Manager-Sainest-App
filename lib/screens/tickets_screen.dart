@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -199,6 +200,16 @@ class _NewTicketSheetState extends State<_NewTicketSheet> {
         screenshotPath: _screenshot?.path,
       );
       if (mounted) Navigator.pop(context, true);
+    } on DioException catch (e) {
+      // Surfaces the server's actual reason (e.g. "Subject, platform,
+      // priority, and description are required.") instead of a generic
+      // message -- createTicket's required fields are enforced
+      // server-side too, and a silent 400 here previously left no clue
+      // which one failed.
+      final serverMessage = e.response?.data is Map ? (e.response?.data as Map)['message']?.toString() : null;
+      if (mounted) {
+        setState(() => _error = serverMessage ?? 'Could not reach the server. Check your connection and try again.');
+      }
     } catch (e) {
       if (mounted) setState(() => _error = 'Could not submit this ticket. Please try again.');
     } finally {
