@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:flutter_alarmkit/flutter_alarmkit.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,6 +13,7 @@ import 'api_client.dart';
 
 const _askedBatteryOptKey = 'asked_battery_opt_once';
 const _askedFullScreenIntentKey = 'asked_full_screen_intent_once';
+const _askedAlarmKitKey = 'asked_alarmkit_auth_once';
 
 /// Set whenever the overdue alarm needs the app's UI to jump straight to
 /// the full-screen Alarm screen: a cold start via the full-screen-intent
@@ -37,6 +40,17 @@ class NotificationService {
 
   final _plugin = FlutterLocalNotificationsPlugin();
   bool _initialized = false;
+
+  // AlarmKit (iOS 26+) is what actually gets a full-screen, Do-Not-
+  // Disturb-breaking alarm UI on screen while the app is fully killed --
+  // DarwinNotificationDetails below (even at .timeSensitive) only ever
+  // posts a normal notification banner, since iOS gives third-party apps
+  // no fullScreenIntent equivalent outside AlarmKit. Every call through
+  // this is wrapped in try/catch: the plugin throws PlatformException on
+  // iOS < 26 or when AlarmKit authorization was never granted, and in
+  // both cases the existing zonedSchedule/show call right next to it is
+  // left as the only alert -- so this is additive, never a replacement.
+  final _alarmKit = FlutterAlarmkit();
 
   // Exposed for background_watcher_service.dart's one-off channel setup,
   // which needs the plugin instance directly rather than any method this
@@ -96,6 +110,10 @@ class NotificationService {
   /// app" toggle below, which no API can set programmatically. Shows the
   /// OS's own confirmation dialog; returns whether it's granted afterward.
   Future<bool> requestBatteryOptimizationExemption() async {
+    // Android-only concept (Doze/App Standby) -- iOS has no equivalent
+    // battery-optimization toggle, and permission_handler's
+    // ignoreBatteryOptimizations permission only exists on Android.
+    if (!Platform.isAndroid) return true;
     final status = await Permission.ignoreBatteryOptimizations.status;
     if (status.isGranted) return true;
     final result = await Permission.ignoreBatteryOptimizations.request();
@@ -122,8 +140,10 @@ class NotificationService {
     await prefs.setBool(_askedBatteryOptKey, true);
   }
 
-  Future<bool> isBatteryOptimizationExempt() async =>
-      Permission.ignoreBatteryOptimizations.status.then((s) => s.isGranted);
+  Future<bool> isBatteryOptimizationExempt() async {
+    if (!Platform.isAndroid) return true;
+    return Permission.ignoreBatteryOptimizations.status.then((s) => s.isGranted);
+  }
 
   /// Whether exact/alarm-clock scheduling is actually available -- on
   /// Android 12+ this needs a person-granted "Alarms & reminders" toggle
@@ -151,6 +171,9 @@ class NotificationService {
   /// returns false if none of them exist on this device (unknown/other
   /// OEM, or a stock-Android phone that doesn't need this at all).
   Future<bool> openAutoStartSettings() async {
+    // android_intent_plus is explicitly Android-only (no iOS implementation
+    // registered), and none of these OEM screens exist on iOS anyway.
+    if (!Platform.isAndroid) return false;
     const candidates = [
       ['com.vivo.permissionmanager', 'com.vivo.permissionmanager.activity.BgStartUpManagerActivity'],
       ['com.vivo.permissionmanager', 'com.vivo.permissionmanager.activity.PurviewTabActivity'],
@@ -213,6 +236,88 @@ class NotificationService {
     if (prefs.getBool(_askedFullScreenIntentKey) ?? false) return;
     await requestFullScreenIntentPermission();
     await prefs.setBool(_askedFullScreenIntentKey, true);
+  }
+
+  /// One-time prompt for AlarmKit's own authorization (iOS 26+ only) --
+  /// separate from, and in addition to, the regular notification
+  /// permission above. Without this being granted, every AlarmKit
+  /// schedule call below silently throws and the app falls back to its
+  /// existing time-sensitive notification. No-ops on Android and on
+  /// iOS < 26 (the plugin throws there; swallowed since there's nothing
+  /// to ask for).
+  Future<void> requestAlarmKitAuthorizationOnce() async {
+    if (!Platform.isIOS) return;
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_askedAlarmKitKey) ?? false) return;
+    try {
+      await _alarmKit.requestAuthorization();
+    } catch (_) {}
+    await prefs.setBool(_askedAlarmKitKey, true);
+  }
+
+  static String _alarmKitIdPrefsKey(String taskId) => 'alarmkit_id_$taskId';
+
+  // Reverse index (AlarmKit's own UUID -> the same {taskId, taskName,
+  // spaceName} payload the Android notification path already carries).
+  // AlarmMetadata only exposes a bare icon/subtitle pair -- not
+  // structured data -- so this is how checkAlertingAlarmKitAlarm/
+  // listenForAlarmKitAlerts below recover which task a ringing AlarmKit
+  // alarm belongs to well enough to route into the same AlarmScreen
+  // Android's fullScreenIntent tap already reaches via pendingAlarmNotifier.
+  static String _alarmKitTaskPrefsKey(String alarmId) => 'alarmkit_task_$alarmId';
+
+  /// Best-effort AlarmKit schedule for a task's overdue alert -- see the
+  /// _alarmKit field's own doc comment for why this exists alongside, not
+  /// instead of, the zonedSchedule/show calls at each call site. Persists
+  /// the returned AlarmKit alarm UUID (keyed by taskId, and back again) so
+  /// cancelOverdueAlarm can cancel it too, and so a ringing alarm can be
+  /// mapped back to its task -- AlarmKit tracks alarms by their own UUID
+  /// rather than the int id flutter_local_notifications uses.
+  Future<void> _scheduleAlarmKitAlarm({
+    required String taskId,
+    required String taskName,
+    required String spaceName,
+    required DateTime when,
+  }) async {
+    if (!Platform.isIOS) return;
+    try {
+      final alarmId = await _alarmKit.scheduleOneShotAlarm(
+        timestamp: when.millisecondsSinceEpoch.toDouble(),
+        label: 'Overdue: $taskName',
+        // Only the single native Stop button fits in AlarmKit's alert (see
+        // requestAlarmKitAuthorizationOnce's own doc comment for the full
+        // reasoning) -- it just silences the ring, it does NOT mark the
+        // task complete, so it's labelled neutrally rather than "Complete".
+        // Tapping anywhere else on the alert opens the app straight into
+        // the same AlarmScreen the Android path uses, which has the real
+        // Slide-to-complete/Snooze/End actions.
+        uiConfig: const AlarmUIConfig(
+          stopButton: AlarmButtonConfig(text: 'Dismiss', icon: 'xmark.circle', tintColor: '#EF4444'),
+        ),
+      );
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_alarmKitIdPrefsKey(taskId), alarmId);
+      await prefs.setString(
+        _alarmKitTaskPrefsKey(alarmId),
+        _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
+      );
+    } catch (_) {
+      // iOS < 26, AlarmKit not authorized, or a platform hiccup -- the
+      // time-sensitive notification scheduled alongside this is still
+      // the person's alert in that case.
+    }
+  }
+
+  Future<void> _cancelAlarmKitAlarm(String taskId) async {
+    if (!Platform.isIOS) return;
+    final prefs = await SharedPreferences.getInstance();
+    final alarmId = prefs.getString(_alarmKitIdPrefsKey(taskId));
+    if (alarmId == null) return;
+    try {
+      await _alarmKit.cancelAlarm(alarmId: alarmId);
+    } catch (_) {}
+    await prefs.remove(_alarmKitTaskPrefsKey(alarmId));
+    await prefs.remove(_alarmKitIdPrefsKey(taskId));
   }
 
   static const _channel = AndroidNotificationDetails(
@@ -351,6 +456,14 @@ class NotificationService {
       const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
       payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
     );
+    // AlarmKit has no "fire immediately" call -- a few seconds out is the
+    // closest equivalent and is indistinguishable from instant to a person.
+    await _scheduleAlarmKitAlarm(
+      taskId: taskId,
+      taskName: taskName,
+      spaceName: spaceName,
+      when: DateTime.now().add(const Duration(seconds: 2)),
+    );
   }
 
   /// Schedules the overdue alarm to fire at [when] -- the task's exact due
@@ -390,6 +503,61 @@ class NotificationService {
       print(st);
       rethrow;
     }
+    await _scheduleAlarmKitAlarm(taskId: taskId, taskName: taskName, spaceName: spaceName, when: when);
+  }
+
+  /// Looks up the task payload persisted for [alarmId] (see
+  /// _scheduleAlarmKitAlarm) and, if present, feeds it into
+  /// pendingAlarmNotifier -- the exact same trigger router.dart already
+  /// watches to redirect to the full AlarmScreen (Slide-to-complete/
+  /// Snooze/End) for the Android notification-tap path. This is what
+  /// makes tapping an AlarmKit alert reach that same screen instead of
+  /// just opening the app to Home.
+  Future<void> _routeToAlarmScreenFor(String alarmId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final payload = prefs.getString(_alarmKitTaskPrefsKey(alarmId));
+    if (payload == null) return;
+    try {
+      pendingAlarmNotifier.value = jsonDecode(payload) as Map<String, dynamic>;
+    } catch (_) {}
+  }
+
+  /// Cold-start counterpart to getLaunchDetails() above, for the AlarmKit
+  /// path: AlarmKit has no "did this launch come from tapping an alert"
+  /// API of its own, so this instead asks the system for every alarm it
+  /// still knows about and checks whether any is currently
+  /// AlarmState.alerting -- true right after the person taps a ringing
+  /// alert to open the app. Call once at startup, after init(); a no-op
+  /// on Android and iOS < 26.
+  Future<void> checkAlertingAlarmKitAlarm() async {
+    if (!Platform.isIOS) return;
+    try {
+      final alarms = await _alarmKit.getAlarms();
+      for (final alarm in alarms) {
+        if (alarm.state == AlarmState.alerting) {
+          await _routeToAlarmScreenFor(alarm.id);
+          return;
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// Live counterpart to the cold-start check above, for while the app is
+  /// already running (foreground or backgrounded-but-alive) when an
+  /// AlarmKit alarm starts ringing -- AlarmState.alerting only shows up
+  /// as a fresh `updated` event here, checkAlertingAlarmKitAlarm() above
+  /// won't see it until the next full launch. Call once at startup;
+  /// deliberately never cancelled, same lifetime as the app process. A
+  /// no-op on Android and iOS < 26.
+  void listenForAlarmKitAlerts() {
+    if (!Platform.isIOS) return;
+    try {
+      _alarmKit.alarmUpdates().listen((event) {
+        if (event.alarm?.state == AlarmState.alerting) {
+          _routeToAlarmScreenFor(event.alarmId);
+        }
+      });
+    } catch (_) {}
   }
 
   // Best-effort: a caller like the Alarm screen's Complete/End actions
@@ -402,6 +570,7 @@ class NotificationService {
     try {
       await _plugin.cancel(_alarmId(taskId));
     } catch (_) {}
+    await _cancelAlarmKitAlarm(taskId);
   }
 
   Future<void> cancel(int id) => _plugin.cancel(id);

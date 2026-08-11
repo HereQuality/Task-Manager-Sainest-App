@@ -43,6 +43,7 @@ dependencies:
   # Optional screenshot attachment on a new support ticket -- matches
   # NewTicketModal.jsx's image picker on the web.
   image_picker: ^1.1.2
+  flutter_alarmkit: ^0.4.0
 
 dev_dependencies:
   flutter_test:
