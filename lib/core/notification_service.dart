@@ -392,7 +392,17 @@ class NotificationService {
     }
   }
 
-  Future<void> cancelOverdueAlarm(String taskId) => _plugin.cancel(_alarmId(taskId));
+  // Best-effort: a caller like the Alarm screen's Complete/End actions
+  // awaits this right after already marking the task complete/dismissed
+  // server-side -- if the plugin call itself throws (platform-channel
+  // hiccup, OEM quirk), that must never block the caller from proceeding
+  // to navigate away. Worst case a stale scheduled notification lingers,
+  // which is harmless compared to leaving the person stuck on this screen.
+  Future<void> cancelOverdueAlarm(String taskId) async {
+    try {
+      await _plugin.cancel(_alarmId(taskId));
+    } catch (_) {}
+  }
 
   Future<void> cancel(int id) => _plugin.cancel(id);
   Future<void> cancelAll() => _plugin.cancelAll();

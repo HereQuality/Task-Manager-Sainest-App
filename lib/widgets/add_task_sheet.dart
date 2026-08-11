@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../core/theme.dart';
+import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
 import '../providers/spaces_provider.dart';
 import '../providers/tasks_provider.dart';
@@ -155,6 +156,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   Widget build(BuildContext context) {
     final spacesAsync = ref.watch(spacesProvider);
     final employeesAsync = ref.watch(assignableEmployeesProvider);
+    final currentUserId = ref.watch(authProvider).user?.id;
     final dateFmt = DateFormat('MMM d, yyyy');
 
     return Padding(
@@ -252,17 +254,30 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             const SizedBox(height: Gap.md),
 
             employeesAsync.when(
-              data: (employees) => DropdownButtonFormField<String>(
-                initialValue: _assigneeId,
-                decoration: const InputDecoration(labelText: 'Assign to'),
-                items: employees
-                    .map((e) => DropdownMenuItem<String>(
-                          value: e['_id'] as String,
-                          child: Text(e['employeeName']?.toString() ?? 'Unnamed'),
-                        ))
-                    .toList(),
-                onChanged: (v) => setState(() => _assigneeId = v),
-              ),
+              data: (employees) {
+                // The signed-in person sorts to the top of their own list,
+                // labeled "Me" instead of their own name -- assigning a
+                // task to yourself is the single most common pick here, so
+                // it shouldn't be buried wherever their name happens to
+                // fall alphabetically among everyone else in the company.
+                // Split-then-concatenate (rather than a comparator) keeps
+                // everyone else in whatever order assignableEmployeesProvider
+                // already sorted them in, since List.sort isn't stable.
+                final me = employees.where((e) => e['_id'] == currentUserId);
+                final others = employees.where((e) => e['_id'] != currentUserId);
+                final sorted = [...me, ...others];
+                return DropdownButtonFormField<String>(
+                  initialValue: _assigneeId,
+                  decoration: const InputDecoration(labelText: 'Assign to'),
+                  items: sorted
+                      .map((e) => DropdownMenuItem<String>(
+                            value: e['_id'] as String,
+                            child: Text(e['_id'] == currentUserId ? 'Me' : (e['employeeName']?.toString() ?? 'Unnamed')),
+                          ))
+                      .toList(),
+                  onChanged: (v) => setState(() => _assigneeId = v),
+                );
+              },
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),
