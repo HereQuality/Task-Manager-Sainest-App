@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -58,6 +59,17 @@ const _tickAlarmId = 7251;
 /// survive exactly this kind of OEM process management, unlike a bare
 /// scheduled alarm with no visible presence to protect it.
 Future<void> initializeBackgroundWatcher() async {
+  // This entire foreground-service + AlarmManager watchdog architecture is
+  // Android-only -- android_alarm_manager_plus has no iOS implementation at
+  // all (calling any of its methods there throws MissingPluginException),
+  // and iOS has no equivalent of a persistent, self-reviving foreground
+  // service to begin with. On iOS the app relies solely on
+  // flutter_local_notifications' own OS-level zonedSchedule (see
+  // notification_service.dart), which -- unlike Android -- keeps firing
+  // even with the app fully killed and needs no background execution of
+  // its own, so skipping this whole subsystem there costs nothing.
+  if (!Platform.isAndroid) return;
+
   const channel = AndroidNotificationChannel(
     _watcherChannelId,
     'Task Watcher',
@@ -84,11 +96,15 @@ Future<void> initializeBackgroundWatcher() async {
 }
 
 Future<void> startBackgroundWatcher() async {
+  // Never configured on iOS (see initializeBackgroundWatcher) -- nothing to
+  // start there.
+  if (!Platform.isAndroid) return;
   final service = FlutterBackgroundService();
   if (!await service.isRunning()) await service.startService();
 }
 
 Future<void> stopBackgroundWatcher() async {
+  if (!Platform.isAndroid) return;
   final service = FlutterBackgroundService();
   if (await service.isRunning()) service.invoke('stopService');
   await AndroidAlarmManager.cancel(_watchdogAlarmId);
@@ -110,6 +126,11 @@ Future<void> stopBackgroundWatcher() async {
 /// Safe to call on every cold start -- periodic() with the same id just
 /// re-arms the existing alarm rather than stacking up duplicates.
 Future<void> armWatchdog() async {
+  // android_alarm_manager_plus has no iOS implementation -- calling
+  // .initialize() there throws MissingPluginException. This was previously
+  // called unconditionally from main.dart before runApp(), which crashed
+  // the app on every iOS launch.
+  if (!Platform.isAndroid) return;
   await AndroidAlarmManager.initialize();
   await AndroidAlarmManager.periodic(
     const Duration(hours: 2),

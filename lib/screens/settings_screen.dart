@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/notification_service.dart';
@@ -112,6 +113,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
       body: ListView(
         padding: const EdgeInsets.all(Gap.lg),
         children: [
+          // Every control in this card (full-screen-intent permission,
+          // battery-optimization exemption, OEM autostart screens, exact
+          // alarms) is an Android-only concept -- iOS schedules local
+          // notifications at the OS level with none of these caveats, so
+          // there's nothing here for an iPhone user to act on.
+          if (Platform.isAndroid) ...[
           _SectionLabel('Background reliability'),
           Card(
             child: Padding(
@@ -220,6 +227,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
             ),
           ),
           const SizedBox(height: Gap.xl),
+          ],
           _SectionLabel('General'),
           Card(
             child: _SettingTile(

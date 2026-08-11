@@ -45,6 +45,15 @@ Future<void> main() async {
   // can sit invisible while the phone's locked (see
   // requestFullScreenIntentPermissionOnce's own doc comment).
   await NotificationService.instance.requestFullScreenIntentPermissionOnce();
+  // AlarmKit's own authorization (iOS 26+) -- separate from the regular
+  // notification permission above; without it the overdue alarm silently
+  // falls back to a plain time-sensitive notification (see
+  // requestAlarmKitAuthorizationOnce's own doc comment).
+  await NotificationService.instance.requestAlarmKitAuthorizationOnce();
+  // Live counterpart of the AlarmKit cold-start check just below -- picks
+  // up an alarm that starts ringing while the app is already running.
+  // See its own doc comment for why this needs to be separate.
+  NotificationService.instance.listenForAlarmKitAlerts();
 
   // Was this a cold start caused by tapping/launching the overdue
   // alarm's full-screen notification? If so, seed pendingAlarmNotifier
@@ -60,6 +69,11 @@ Future<void> main() async {
     } catch (_) {
       // Malformed/unrelated payload -- fall through to a normal launch.
     }
+  } else {
+    // AlarmKit's equivalent of the check above -- see
+    // checkAlertingAlarmKitAlarm's own doc comment for why this needs a
+    // separate, active lookup instead of a launch-details flag.
+    await NotificationService.instance.checkAlertingAlarmKitAlarm();
   }
 
   runApp(const ProviderScope(child: HqeplApp()));

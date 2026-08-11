@@ -40,6 +40,7 @@ dependencies:
   # service's own process lifetime, so it can detect and restart that
   # service even after Android has killed it outright.
   android_alarm_manager_plus: ^4.0.4
+  flutter_alarmkit: ^0.4.0
 
 dev_dependencies:
   flutter_test:
