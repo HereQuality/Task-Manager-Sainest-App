@@ -182,6 +182,16 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // Low overdue tasks still show in this feed and still get the
       // quieter due-soon reminder below, just never the alarm treatment.
       final isUrgent = (t['priority'] ?? '').toString() == 'Urgent';
+      // `tasks` (myTasksProvider) includes subordinates' tasks too for a
+      // manager/senior (see task.controller.js#listMyTasksAll), so without
+      // this check a junior's Urgent overdue task would also ring the
+      // full-screen alarm on their senior's phone -- the alarm is meant
+      // to be assignee-only; a senior's own alert for their team's overdue
+      // work is the quieter escalation notification instead (see
+      // fetchTeamOverdueEscalations above).
+      final assigneeIdRaw = t['assigneeId'];
+      final taskAssigneeId = (assigneeIdRaw is Map ? assigneeIdRaw['_id'] : assigneeIdRaw)?.toString();
+      final isMine = taskAssigneeId != null && taskAssigneeId == currentUserId;
 
       if (isComplete) {
         // Done -- stop any pending/ringing alarm for it.
@@ -210,7 +220,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         // the web app, so this device never had a chance to schedule
         // it ahead of time via the `else` branch below). Fires once;
         // `alertedIds` stops it from re-ringing on every feed refresh.
-        if (isUrgent && !alertedIds.contains(id)) {
+        if (isUrgent && isMine && !alertedIds.contains(id)) {
           await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
           // Posting the notification above only gets Android to launch
           // the full-screen intent when the app is backgrounded/closed
@@ -228,9 +238,10 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         // Not overdue yet -- arm the alarm for the exact moment it
         // becomes overdue (exact-time AlarmManager scheduling, so this
         // still fires even if the app gets closed before then). Urgent
-        // only -- the quieter due-soon reminder just below still applies
-        // to every priority.
-        if (isUrgent) {
+        // AND assignee-only -- the quieter due-soon reminder just below
+        // still applies to every priority (and to a senior's view of
+        // their team's tasks too).
+        if (isUrgent && isMine) {
           await NotificationService.instance.scheduleOverdueAlarmAt(
             taskId: id,
             taskName: title,

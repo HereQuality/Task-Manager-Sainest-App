@@ -219,6 +219,7 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
   final stillOverdueIds = <String>{};
   final now = DateTime.now();
   var urgentCount = 0;
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
 
   for (final t in tasks) {
     final status = (t['status'] ?? '').toString().toLowerCase();
@@ -228,6 +229,14 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
     // The loud full-screen alarm is reserved for Urgent tasks only -- see
     // the matching check in notifications_provider.dart's foreground pass.
     if ((t['priority'] ?? '').toString() != 'Urgent') continue;
+    // `tasks` (/tasks/mine/all) includes subordinates' tasks too for a
+    // manager/senior -- without this, a junior's Urgent overdue task
+    // would also ring the full-screen alarm on their senior's phone. The
+    // alarm is assignee-only; see the matching guard in
+    // notifications_provider.dart's foreground pass.
+    final assigneeIdRaw = t['assigneeId'];
+    final taskAssigneeId = (assigneeIdRaw is Map ? assigneeIdRaw['_id'] : assigneeIdRaw)?.toString();
+    if (taskAssigneeId == null || taskAssigneeId != currentUserId) continue;
     urgentCount++;
 
     final dueRaw = t['dueDate'];
