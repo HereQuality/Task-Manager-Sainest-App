@@ -1,7 +1,7 @@
 name: hqepl_mobile
 description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
 publish_to: 'none'
-version: 1.0.0+7
+version: 1.0.0+8
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -40,6 +40,9 @@ dependencies:
   # service's own process lifetime, so it can detect and restart that
   # service even after Android has killed it outright.
   android_alarm_manager_plus: ^4.0.4
+  # Optional screenshot attachment on a new support ticket -- matches
+  # NewTicketModal.jsx's image picker on the web.
+  image_picker: ^1.1.2
 
 dev_dependencies:
   flutter_test:

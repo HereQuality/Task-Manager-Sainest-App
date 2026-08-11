@@ -7,6 +7,7 @@ import '../screens/home_shell.dart';
 import '../screens/notifications_screen.dart';
 import '../screens/settings_screen.dart';
 import '../screens/tickets_screen.dart';
+import '../screens/ticket_detail_screen.dart';
 import '../screens/splash_screen.dart';
 import '../screens/task_detail_screen.dart';
 import '../screens/alarm_screen.dart';
@@ -55,7 +56,16 @@ final routerProvider = Provider<GoRouter>((ref) {
         routes: [
           GoRoute(path: 'notifications', builder: (context, state) => const NotificationsScreen()),
           GoRoute(path: 'settings', builder: (context, state) => const SettingsScreen()),
-          GoRoute(path: 'tickets', builder: (context, state) => const TicketsScreen()),
+          GoRoute(
+            path: 'tickets',
+            builder: (context, state) => const TicketsScreen(),
+            routes: [
+              GoRoute(
+                path: ':id',
+                builder: (context, state) => TicketDetailScreen(ticketId: state.pathParameters['id']!),
+              ),
+            ],
+          ),
           GoRoute(
             path: 'tasks/:id',
             builder: (context, state) => TaskDetailScreen(taskId: state.pathParameters['id']!),
