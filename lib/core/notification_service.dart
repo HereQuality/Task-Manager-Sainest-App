@@ -250,7 +250,7 @@ class NotificationService {
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool(_askedAlarmKitKey) ?? false) return;
     try {
-      await _alarmKit.requestAuthorization();
+      await _alarmKit.requestAuthorization().timeout(const Duration(seconds: 10));
     } catch (_) {}
     await prefs.setBool(_askedAlarmKitKey, true);
   }
@@ -281,20 +281,22 @@ class NotificationService {
   }) async {
     if (!Platform.isIOS) return;
     try {
-      final alarmId = await _alarmKit.scheduleOneShotAlarm(
-        timestamp: when.millisecondsSinceEpoch.toDouble(),
-        label: 'Overdue: $taskName',
-        // Only the single native Stop button fits in AlarmKit's alert (see
-        // requestAlarmKitAuthorizationOnce's own doc comment for the full
-        // reasoning) -- it just silences the ring, it does NOT mark the
-        // task complete, so it's labelled neutrally rather than "Complete".
-        // Tapping anywhere else on the alert opens the app straight into
-        // the same AlarmScreen the Android path uses, which has the real
-        // Slide-to-complete/Snooze/End actions.
-        uiConfig: const AlarmUIConfig(
-          stopButton: AlarmButtonConfig(text: 'Dismiss', icon: 'xmark.circle', tintColor: '#EF4444'),
-        ),
-      );
+      final alarmId = await _alarmKit
+          .scheduleOneShotAlarm(
+            timestamp: when.millisecondsSinceEpoch.toDouble(),
+            label: 'Overdue: $taskName',
+            // Only the single native Stop button fits in AlarmKit's alert (see
+            // requestAlarmKitAuthorizationOnce's own doc comment for the full
+            // reasoning) -- it just silences the ring, it does NOT mark the
+            // task complete, so it's labelled neutrally rather than "Complete".
+            // Tapping anywhere else on the alert opens the app straight into
+            // the same AlarmScreen the Android path uses, which has the real
+            // Slide-to-complete/Snooze/End actions.
+            uiConfig: const AlarmUIConfig(
+              stopButton: AlarmButtonConfig(text: 'Dismiss', icon: 'xmark.circle', tintColor: '#EF4444'),
+            ),
+          )
+          .timeout(const Duration(seconds: 5));
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_alarmKitIdPrefsKey(taskId), alarmId);
       await prefs.setString(
@@ -314,7 +316,18 @@ class NotificationService {
     final alarmId = prefs.getString(_alarmKitIdPrefsKey(taskId));
     if (alarmId == null) return;
     try {
-      await _alarmKit.cancelAlarm(alarmId: alarmId);
+      // A timeout, not just try/catch, is load-bearing here: the Alarm
+      // screen's Complete/End buttons await completeOverdueTask ->
+      // cancelOverdueAlarm -> this, then navigate away once it returns
+      // (see alarm_screen.dart's _complete/_end). A native AlarmKit call
+      // that throws is already handled by catch below, but one that
+      // simply never completes -- e.g. cancelling an alarm that already
+      // auto-stopped itself the moment the person tapped its native
+      // alert, which some AlarmKit builds appear to hang on -- would
+      // otherwise leave that await pending forever, stalling the whole
+      // chain before it ever reaches context.go('/home') even though the
+      // task was already marked complete on the server a step earlier.
+      await _alarmKit.cancelAlarm(alarmId: alarmId).timeout(const Duration(seconds: 3));
     } catch (_) {}
     await prefs.remove(_alarmKitTaskPrefsKey(alarmId));
     await prefs.remove(_alarmKitIdPrefsKey(taskId));
@@ -532,7 +545,9 @@ class NotificationService {
   Future<void> checkAlertingAlarmKitAlarm() async {
     if (!Platform.isIOS) return;
     try {
-      final alarms = await _alarmKit.getAlarms();
+      // Timeout so a hung native call can't stall app startup -- this is
+      // awaited directly from main.dart before runApp().
+      final alarms = await _alarmKit.getAlarms().timeout(const Duration(seconds: 3));
       for (final alarm in alarms) {
         if (alarm.state == AlarmState.alerting) {
           await _routeToAlarmScreenFor(alarm.id);
