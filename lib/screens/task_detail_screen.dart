@@ -343,10 +343,30 @@ class _DetailRow extends StatelessWidget {
         children: [
           Icon(icon, size: 18, color: AppColors.inkMuted),
           const SizedBox(width: Gap.md),
+          // label is a short fixed string ("Assigned to", "Priority", ...);
+          // value is the actually dynamic side (an assignee's name, a
+          // formatted date, ...). The outer Expanded bounds how much width
+          // label+value can claim together; the inner spaceBetween keeps
+          // label flush left and value flush right same as before, and
+          // Flexible+ellipsis on value (not label) means IT shrinks first
+          // when a long name doesn't fit, instead of overflowing.
           Expanded(
-            child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(label, style: Theme.of(context).textTheme.bodyMedium),
+                Flexible(
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.ink),
+                  ),
+                ),
+              ],
+            ),
           ),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.ink)),
         ],
       ),
     );
