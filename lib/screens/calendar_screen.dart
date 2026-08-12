@@ -57,6 +57,10 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
                     titleCentered: true,
                     titleTextStyle: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: AppColors.ink),
                   ),
+                  // A little taller than table_calendar's own 52px default --
+                  // the marker gap added below (markersAnchor) needs somewhere
+                  // to sit that isn't crowding the next row down.
+                  rowHeight: 58,
                   calendarStyle: CalendarStyle(
                     outsideDaysVisible: false,
                     todayDecoration: BoxDecoration(
@@ -68,6 +72,16 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
                     markerDecoration: const BoxDecoration(color: AppColors.danger, shape: BoxShape.circle),
                     markersMaxCount: 1,
                     markerSize: 5,
+                    // table_calendar's own doc comment: "A value of 0.5 will
+                    // center the markers AT the bottom edge of day cell's
+                    // decoration" -- i.e. half the dot sits on top of the
+                    // circle. The library's own default (0.7) pulls it up
+                    // even further into the circle, which is exactly the
+                    // "dot on the edge of the circle" look this was meant to
+                    // fix. A negative anchor pushes the dot's top edge below
+                    // the circle's bottom edge instead of into it -- -1.0
+                    // here means a full marker-height gap between the two.
+                    markersAnchor: -1.0,
                   ),
                   selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
                   eventLoader: (day) => byDay[DateTime(day.year, day.month, day.day)] ?? [],

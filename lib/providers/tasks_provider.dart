@@ -79,6 +79,32 @@ Future<List<Map<String, dynamic>>> fetchPendingApprovals() async {
   }
 }
 
+/// Riverpod wrapper around fetchPendingApprovals above, for the Tasks
+/// screen's own "DELEGATED" section -- the plain function itself stays,
+/// since background_watcher_service.dart's isolate still needs to call it
+/// with no ProviderScope available.
+final pendingApprovalsProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) {
+  return fetchPendingApprovals();
+});
+
+/// POST /api/v1/tasks/:id/approve-completion -- only the task's delegator
+/// (createdBy) can call this, and only while completionApproval.status is
+/// "PENDING" (server enforces both; see approveCompletion in
+/// task.controller.js). Moves the task to COMPLETE.
+Future<void> approveTaskCompletion(String taskId) async {
+  await ApiClient.instance.dio.post('/tasks/$taskId/approve-completion');
+}
+
+/// POST /api/v1/tasks/:id/reject-completion -- same delegator-only/PENDING
+/// gate as approveTaskCompletion, but leaves task.status exactly as it
+/// was (never COMPLETE) and bounces it back to the assignee with an
+/// optional reason attached (see rejectCompletion in task.controller.js).
+Future<void> rejectTaskCompletion(String taskId, {String? reason}) async {
+  await ApiClient.instance.dio.post('/tasks/$taskId/reject-completion', data: {
+    if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+  });
+}
+
 /// A single task, full detail -- GET /api/v1/tasks/:id (same endpoint
 /// TaskDetailModal.jsx uses on the web). Backs the Task Detail screen
 /// opened by tapping a task card anywhere (Tasks tab, Home's "Due soon",

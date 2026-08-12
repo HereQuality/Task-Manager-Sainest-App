@@ -18,6 +18,7 @@ enum _DueFilter { all, today, upcoming, overdue }
 const _statusFacetOptions = [
   ('TO DO', 'TO DO'),
   ('IN PROGRESS', 'IN PROGRESS'),
+  ('DELEGATED', 'DELEGATED (Awaiting Approval)'),
   ('OVERDUE', 'OVERDUE'),
   ('COMPLETE', 'COMPLETE'),
   ('COMPLETE_LATE', 'COMPLETE (LATE)'),
@@ -26,7 +27,11 @@ const _priorityOptions = ['Urgent', 'High', 'Normal', 'Low'];
 
 // Fixed status-group order the task list renders in -- still-open work
 // first, completed work last. Matches the keys _effectiveStatus produces.
-const _statusOrder = ['TO DO', 'IN PROGRESS', 'OVERDUE', 'COMPLETE', 'COMPLETE_LATE'];
+// DELEGATED sits before OVERDUE: it's a task someone marked complete that's
+// now sitting on the current person's own decision (approve/reject) --
+// more actionable right now than a plain overdue task still waiting on
+// someone else to move it.
+const _statusOrder = ['TO DO', 'IN PROGRESS', 'DELEGATED', 'OVERDUE', 'COMPLETE', 'COMPLETE_LATE'];
 
 // Mirrors TaskListView.jsx#isTaskOverdue: a not-yet-complete task whose
 // due date has passed.
@@ -52,9 +57,23 @@ bool _isDelayed(Map<String, dynamic> t) {
   return c.isAfter(d);
 }
 
+// Set (see the screen's build method, where tasks from
+// pendingApprovalsProvider are merged into the main list) on a task the
+// current person delegated away and that its assignee has already marked
+// complete -- server-side, task.status is deliberately left as-is until
+// this person approves or rejects it (Task.js#completionApproval), so
+// without this flag a delegated-and-marked-done task would otherwise just
+// silently sit in whatever its pre-completion group was (TO DO/IN
+// PROGRESS), with nothing in the UI showing it actually needs a decision.
+bool _isPendingApproval(Map<String, dynamic> t) => t['_pendingMyApproval'] == true;
+
 // Mirrors TaskListView.jsx#effectiveTaskStatus -- what the Status facet
-// actually filters against, rather than the raw task.status.
+// actually filters against, rather than the raw task.status. Checked
+// before OVERDUE: a task can be both (its due date passed before the
+// assignee got around to marking it complete), and "needs my approval"
+// is the more useful/actionable framing at that point.
 String _effectiveStatus(Map<String, dynamic> t) {
+  if (_isPendingApproval(t)) return 'DELEGATED';
   if (_isOverdue(t)) return 'OVERDUE';
   if (_isDelayed(t)) return 'COMPLETE_LATE';
   return (t['status'] ?? '').toString();
@@ -65,6 +84,7 @@ String _effectiveStatus(Map<String, dynamic> t) {
 // same reasoning as _effectiveStatus above but as a friendly label rather
 // than a filter key.
 String _displayStatus(Map<String, dynamic> t) {
+  if (_isPendingApproval(t)) return 'DELEGATED';
   if (_isOverdue(t)) return 'OVERDUE';
   if (_isDelayed(t)) return 'COMPLETE (LATE)';
   return (t['status'] ?? 'pending').toString();
@@ -218,14 +238,45 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   @override
   Widget build(BuildContext context) {
     final tasksAsync = ref.watch(myTasksProvider);
+    // Best-effort: pendingApprovalsProvider failing/still-loading shouldn't
+    // block the whole screen the way tasksAsync's own error/loading state
+    // does below -- worst case the DELEGATED group is just empty a moment
+    // longer, same "don't let this take the rest of the screen down with
+    // it" reasoning myTasksProvider's own 403 handling already uses.
+    final pendingApprovals = ref.watch(pendingApprovalsProvider).value ?? const <Map<String, dynamic>>[];
 
     return Scaffold(
       appBar: AppBar(title: const Text('My tasks')),
       body: RefreshIndicator(
-        onRefresh: () async => ref.invalidate(myTasksProvider),
+        onRefresh: () async {
+          ref.invalidate(myTasksProvider);
+          ref.invalidate(pendingApprovalsProvider);
+        },
         child: tasksAsync.when(
-          data: (allTasks) {
+          data: (myTasks) {
             final now = DateTime.now();
+
+            // Merges in tasks from pendingApprovalsProvider -- scoped to
+            // "I delegated this away and it's now waiting on MY decision",
+            // which can include tasks assigned to someone outside this
+            // person's own subordinate chain (a lateral delegate), so
+            // myTasksProvider's assignee/subordinate-scoped list above
+            // can't be assumed to already contain them. Dedupes by _id
+            // (a task can legitimately appear in both, e.g. delegated to
+            // one's own subordinate) and flags every pending-approval task
+            // so _effectiveStatus/_displayStatus can classify it as
+            // DELEGATED regardless of which list it came from.
+            final pendingIds = pendingApprovals.map((p) => (p['_id'] ?? '').toString()).toSet();
+            final byId = <String, Map<String, dynamic>>{};
+            for (final t in myTasks) {
+              final id = (t['_id'] ?? '').toString();
+              byId[id] = pendingIds.contains(id) ? {...t, '_pendingMyApproval': true} : t;
+            }
+            for (final p in pendingApprovals) {
+              final id = (p['_id'] ?? '').toString();
+              byId.putIfAbsent(id, () => {...p, '_pendingMyApproval': true});
+            }
+            final allTasks = byId.values.toList();
 
             // Built from every task, not the filtered set below -- the
             // available choices in the filter sheet shouldn't shrink just
