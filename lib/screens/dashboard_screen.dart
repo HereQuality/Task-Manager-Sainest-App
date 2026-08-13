@@ -167,22 +167,36 @@ class _StatCard extends StatelessWidget {
               decoration: BoxDecoration(color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(9)),
               child: Icon(icon, color: color, size: 17),
             ),
-            Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.headlineSmall,
+            // This card's height is fixed by the parent GridView's
+            // childAspectRatio, not sized to content -- maxLines/ellipsis
+            // alone still overflows if the icon+value+label together are
+            // just taller than that fixed height on a given screen size or
+            // system font-scale setting (seen on an iPhone 13 running iOS
+            // 18, not just accessibility settings). Expanded+FittedBox
+            // gives each text its bounded share of the remaining height
+            // and shrinks it to fit instead, which can't overflow on any
+            // device regardless of exact metrics.
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  value,
+                  maxLines: 1,
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+              ),
             ),
-            // maxLines/ellipsis matter here specifically: this card's height
-            // is fixed by the parent GridView's childAspectRatio, not sized
-            // to content, so a longer label wrapping to a 3rd line (a
-            // narrower phone, or a larger system font-scale accessibility
-            // setting) would overflow the card instead of just truncating.
-            Text(
-              label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodyMedium,
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
             ),
           ],
         ),

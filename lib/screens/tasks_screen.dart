@@ -600,9 +600,17 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                                           child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.inkMuted),
                                         ),
                                         const SizedBox(width: Gap.xs),
-                                        Text(
-                                          entry.headerLabel!,
-                                          style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                                        // Flexible+ellipsis: the longest header label,
+                                        // "DELEGATED (Awaiting Approval)", can overflow
+                                        // the row on a narrow phone or a larger system
+                                        // font-scale setting without this.
+                                        Flexible(
+                                          child: Text(
+                                            entry.headerLabel!,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                                          ),
                                         ),
                                         const SizedBox(width: Gap.sm),
                                         Text(
