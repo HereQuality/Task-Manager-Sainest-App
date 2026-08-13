@@ -53,7 +53,16 @@ Future<void> createTicket({
       'platform': platform,
       'priority': priority,
       'description': description,
-      'screenshot': await MultipartFile.fromFile(screenshotPath),
+      // Dio's MultipartFile.fromFile does NOT infer a content-type from
+      // the file extension by default (its own doc comment: "currently
+      // defaults to application/octet-stream") -- left unset, the
+      // server's imageOnlyFilter (multer, upload.middleware.js) would
+      // reject every screenshot with "Not an image!" since it checks the
+      // actual mimetype, not the field name or file extension.
+      'screenshot': await MultipartFile.fromFile(
+        screenshotPath,
+        contentType: MultipartFile.lookupMediaType(screenshotPath),
+      ),
     });
     // ApiClient's Dio instance carries a blanket 'Content-Type:
     // application/json' header (see api_client.dart) for every other

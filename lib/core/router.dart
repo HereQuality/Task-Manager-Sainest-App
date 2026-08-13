@@ -12,6 +12,7 @@ import '../screens/splash_screen.dart';
 import '../screens/task_detail_screen.dart';
 import '../screens/alarm_screen.dart';
 import '../core/notification_service.dart';
+import '../core/pending_attachment_service.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final authNotifier = ref.watch(authProvider.notifier);
@@ -23,7 +24,9 @@ final routerProvider = Provider<GoRouter>((ref) {
     // or read from launch details for a cold start -- see main.dart and
     // notification_service.dart) so the redirect below re-runs for
     // either trigger.
-    refreshListenable: Listenable.merge([_AuthListenable(ref), pendingAlarmNotifier]),
+    refreshListenable: Listenable.merge(
+      [_AuthListenable(ref), pendingAlarmNotifier, pendingAttachmentTaskNotifier],
+    ),
     redirect: (context, state) {
       final auth = ref.read(authProvider);
       final loc = state.matchedLocation;
@@ -43,6 +46,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       // the app would otherwise land.
       if (pendingAlarmNotifier.value != null && loc != '/home/alarm') {
         return '/home/alarm';
+      }
+      // A task attachment pick that survived an Android Activity teardown
+      // (see pending_attachment_service.dart) -- jumps straight to that
+      // task instead of ever rendering Home, the same "skip the default
+      // landing spot" reasoning as the alarm redirect just above.
+      final pendingTaskId = pendingAttachmentTaskNotifier.value;
+      if (pendingTaskId != null && loc != '/home/tasks/$pendingTaskId') {
+        return '/home/tasks/$pendingTaskId';
       }
       if (loc == '/login' || loc == '/splash') return '/home';
       return null;

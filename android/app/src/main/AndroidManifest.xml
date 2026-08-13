@@ -26,6 +26,24 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- Task detail screen: recording a voice message for a task's comment
+         thread. The `record` package needs this declared AND requested
+         at runtime (see task_comments_section.dart's _recorder.hasPermission()
+         call), unlike the camera permission below. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Deliberately NOT declaring android.permission.CAMERA here for the
+         "Take photo" attachment option: image_picker's camera capture
+         works by handing off to whatever camera app is already installed
+         via an implicit intent, which needs no permission from THIS app
+         at all (the camera app handles its own). Declaring CAMERA
+         ourselves without also requesting it at runtime (which this app
+         never does) made Android treat it as a required but ungranted
+         dangerous permission on the handoff, throwing a SecurityException
+         and crashing "Take photo" outright. Tried and reverted; see
+         image_picker's own docs on why camera permission should stay
+         undeclared unless the runtime request is also done for it. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
     <!-- Lets the overdue-task notification launch the app full-screen,
          on top of the lock screen, like a real alarm clock. See
          NotificationService's overdue channel (fullScreenIntent: true).

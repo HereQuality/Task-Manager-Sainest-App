@@ -105,6 +105,89 @@ Future<void> rejectTaskCompletion(String taskId, {String? reason}) async {
   });
 }
 
+/// A task's subtasks -- GET /api/v1/tasks/:id/subtasks (same endpoint
+/// TaskDetailModal.jsx's Subtasks panel uses).
+final subtasksProvider = FutureProvider.autoDispose.family<List<Map<String, dynamic>>, String>((ref, taskId) async {
+  final res = await ApiClient.instance.dio.get('/tasks/$taskId/subtasks');
+  final data = res.data['data'] ?? [];
+  return List<Map<String, dynamic>>.from(data);
+});
+
+/// Creates a subtask under a task -- POST /api/v1/tasks/:id/subtasks.
+/// Only `name` is required here even though the server also accepts
+/// status/assigneeId/dueDate/priority (see createSubtask in
+/// task.controller.js) -- the mobile "quick add" sheet is deliberately
+/// minimal, same reasoning as everywhere else this app creates something
+/// on the go; a subtask needing more detail can be opened and edited
+/// afterward like any other task.
+Future<void> createSubtask(String parentTaskId, {required String name}) async {
+  await ApiClient.instance.dio.post('/tasks/$parentTaskId/subtasks', data: {'name': name});
+}
+
+/// Replaces a task's whole checklists array -- PUT /api/v1/tasks/:id
+/// {checklists}, the same "send the whole array back" pattern the web
+/// app uses (Task.js's own doc comment: "same as tags"). The caller is
+/// expected to send the FULL array (existing checklists/items plus
+/// whatever just changed), not a partial patch.
+Future<void> updateTaskChecklists(String taskId, List<Map<String, dynamic>> checklists) async {
+  await ApiClient.instance.dio.put('/tasks/$taskId', data: {'checklists': checklists});
+}
+
+/// Uploads a file to a task -- POST /api/v1/tasks/:id/attachments,
+/// multipart field "file" (matches uploadTaskAttachment.single("file")
+/// server-side). Any file type/format works here, camera photo or picked
+/// document alike -- see AttachmentSchema's own doc comment in Task.js.
+Future<void> uploadTaskAttachment(String taskId, String filePath) async {
+  final formData = FormData.fromMap({
+    // lookupMediaType is required -- see createTicket's own doc comment
+    // in tickets_provider.dart for why fromFile alone silently sends
+    // application/octet-stream instead of the file's real type.
+    'file': await MultipartFile.fromFile(filePath, contentType: MultipartFile.lookupMediaType(filePath)),
+  });
+  await ApiClient.instance.dio.post(
+    '/tasks/$taskId/attachments',
+    data: formData,
+    options: Options(contentType: 'multipart/form-data'),
+  );
+}
+
+/// DELETE /api/v1/tasks/:id/attachments/:attachmentId -- server enforces
+/// who's allowed (the task's delegator/delegate, or SuperAdmin/Teams-
+/// Full-Access; see assertCanEditTask in task.controller.js).
+Future<void> deleteTaskAttachment(String taskId, String attachmentId) async {
+  await ApiClient.instance.dio.delete('/tasks/$taskId/attachments/$attachmentId');
+}
+
+/// Posts a text message to a task's comment thread -- POST
+/// /api/v1/tasks/:id/comments {message}.
+Future<void> addTaskTextComment(String taskId, String message) async {
+  await ApiClient.instance.dio.post('/tasks/$taskId/comments', data: {'message': message});
+}
+
+/// Posts a recorded voice message to a task's comment thread -- same
+/// route as the text version above, but multipart with field "audio"
+/// (matches uploadTaskCommentAudio.single("audio") server-side) plus how
+/// long the recording runs, so the UI can show a duration without
+/// decoding the audio file itself.
+Future<void> addTaskAudioComment(String taskId, String audioPath, {required int durationSeconds}) async {
+  final formData = FormData.fromMap({
+    'durationSeconds': durationSeconds,
+    'audio': await MultipartFile.fromFile(audioPath, contentType: MultipartFile.lookupMediaType(audioPath)),
+  });
+  await ApiClient.instance.dio.post(
+    '/tasks/$taskId/comments',
+    data: formData,
+    options: Options(contentType: 'multipart/form-data'),
+  );
+}
+
+/// DELETE /api/v1/tasks/:id/comments/:commentId -- server enforces that
+/// only the message's own author (or SuperAdmin/Teams-Full-Access) can
+/// remove it.
+Future<void> deleteTaskComment(String taskId, String commentId) async {
+  await ApiClient.instance.dio.delete('/tasks/$taskId/comments/$commentId');
+}
+
 /// A single task, full detail -- GET /api/v1/tasks/:id (same endpoint
 /// TaskDetailModal.jsx uses on the web). Backs the Task Detail screen
 /// opened by tapping a task card anywhere (Tasks tab, Home's "Due soon",

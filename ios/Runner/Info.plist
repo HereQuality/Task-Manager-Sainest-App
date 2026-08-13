@@ -77,7 +77,11 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>This app needs access to the local network to discover and connect to alarm devices.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Allow access to your photos to attach a screenshot to a support ticket.</string>
+	<string>Allow access to your photos to attach a screenshot to a support ticket or a task.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Allow access to your camera to take a photo to attach to a task.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Allow access to your microphone to record a voice message on a task.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

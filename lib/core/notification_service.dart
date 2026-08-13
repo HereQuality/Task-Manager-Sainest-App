@@ -93,12 +93,20 @@ class NotificationService {
     final androidImpl =
         _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     final android = await androidImpl?.requestNotificationsPermission();
+    final granted = (ios ?? true) && (android ?? true);
     // Exact-time scheduling (used by the overdue alarm and due-soon
     // reminders below) needs this separately on Android 12+ -- without
     // it the OS silently downgrades zonedSchedule to an inexact timer
-    // that can drift by tens of minutes.
-    await androidImpl?.requestExactAlarmsPermission();
-    return (ios ?? true) && (android ?? true);
+    // that can drift by tens of minutes. Skipped entirely if the person
+    // just said no to notifications outright -- on some OEMs this jumps
+    // straight to a system Settings screen rather than a dialog, and
+    // chaining that (plus the battery-optimization and full-screen-intent
+    // asks main.dart makes right after a granted result) onto a "no"
+    // answer is what made denying notifications feel like the app itself
+    // had crashed: several more native prompts/Settings screens firing
+    // back-to-back with no app UI visible yet underneath any of them.
+    if (granted) await androidImpl?.requestExactAlarmsPermission();
+    return granted;
   }
 
   /// Asks the OS to stop applying Doze/App Standby battery optimization to
@@ -196,7 +204,25 @@ class NotificationService {
         continue;
       }
     }
-    return false;
+    // None of the known OEM screens matched -- happens on newer firmware
+    // that renamed/moved them (seen in practice on a Vivo/OriginOS build
+    // where none of the vivo.permissionmanager/iqoo.secure candidates
+    // above existed). Falling all the way through to a snackbar with
+    // nowhere to go is a dead end, so this instead opens this app's own
+    // standard Android "App info" settings screen -- every OEM skin
+    // exposes battery/background-activity controls from there, even when
+    // there's no dedicated "Autostart" page this app can jump straight
+    // to. Not as direct as the real thing, but always one tap away
+    // instead of a wall.
+    try {
+      await const AndroidIntent(
+        action: 'android.settings.APPLICATION_DETAILS_SETTINGS',
+        data: 'package:com.hqepl.qtask360',
+      ).launch();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Checks (and if needed, asks for) Android 14's dedicated "Full screen
@@ -356,17 +382,23 @@ class NotificationService {
     priority: Priority.high,
   );
 
+  // Best-effort, same reasoning as scheduleAt above -- called in a loop
+  // from notifications_provider.dart/background_watcher_service.dart, so
+  // one native hiccup posting a single task-update notification must
+  // never abort the rest of that loop.
   Future<void> showTaskUpdateNotification({
     required String taskId,
     required String title,
     required String body,
   }) async {
-    await _plugin.show(
-      'taskupdate_$taskId'.hashCode & 0x7fffffff,
-      title,
-      body,
-      const NotificationDetails(android: _taskUpdatesChannel, iOS: DarwinNotificationDetails()),
-    );
+    try {
+      await _plugin.show(
+        'taskupdate_$taskId'.hashCode & 0x7fffffff,
+        title,
+        body,
+        const NotificationDetails(android: _taskUpdatesChannel, iOS: DarwinNotificationDetails()),
+      );
+    } catch (_) {}
   }
 
   // Separate, louder channel for tasks that have actually passed their due
@@ -418,17 +450,32 @@ class NotificationService {
   );
 
   Future<void> showNow({required int id, required String title, required String body}) async {
-    await _plugin.show(
-      id,
-      title,
-      body,
-      const NotificationDetails(android: _channel, iOS: DarwinNotificationDetails()),
-    );
+    try {
+      await _plugin.show(
+        id,
+        title,
+        body,
+        const NotificationDetails(android: _channel, iOS: DarwinNotificationDetails()),
+      );
+    } catch (_) {}
   }
 
   /// Schedules a one-off reminder at [when]. Pass a stable [id] derived from
   /// the task id so re-scheduling the same task overwrites, rather than
   /// duplicates, its reminder.
+  ///
+  /// Called from inside notifications_provider.dart's feed-building loop,
+  /// once per due-soon task -- with no try/catch, a single native failure
+  /// here (e.g. flutter_local_notifications' own known Gson/TypeToken
+  /// crash reading its persisted scheduled-notification list on some
+  /// devices/builds -- "TypeToken must be created with a type argument")
+  /// used to propagate all the way up and fail the ENTIRE Notifications
+  /// feed, not just this one reminder -- showing as "Couldn't load this"
+  /// with a raw stack trace on the Notifications screen, or as an
+  /// apparent crash right after the first-launch permission prompt (the
+  /// feed is computed again immediately after). A missed due-soon device
+  /// reminder is not worth losing the whole feed over, so this is
+  /// best-effort like every other native-call site in this file.
   Future<void> scheduleAt({
     required int id,
     required String title,
@@ -436,15 +483,17 @@ class NotificationService {
     required DateTime when,
   }) async {
     if (when.isBefore(DateTime.now())) return;
-    await _plugin.zonedSchedule(
-      id,
-      title,
-      body,
-      _tzFrom(when),
-      const NotificationDetails(android: _channel, iOS: DarwinNotificationDetails()),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-    );
+    try {
+      await _plugin.zonedSchedule(
+        id,
+        title,
+        body,
+        _tzFrom(when),
+        const NotificationDetails(android: _channel, iOS: DarwinNotificationDetails()),
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      );
+    } catch (_) {}
   }
 
   // Stable per-task id so scheduling/firing/cancelling the same task's
@@ -457,18 +506,25 @@ class NotificationService {
 
   /// Fires the overdue alarm immediately -- used when a task is discovered
   /// already overdue (e.g. the app was closed when its due time passed).
+  /// Called in a loop from notifications_provider.dart/
+  /// background_watcher_service.dart alongside several OTHER tasks' own
+  /// alarms/reminders -- try/catch here (same reasoning as scheduleAt
+  /// above) is what stops one task's alarm failing natively from also
+  /// silently swallowing every other task's alert in the same pass.
   Future<void> showOverdueAlarmNow({
     required String taskId,
     required String taskName,
     required String spaceName,
   }) async {
-    await _plugin.show(
-      _alarmId(taskId),
-      'Overdue: $taskName',
-      spaceName.isNotEmpty ? 'Space: $spaceName · tap Complete or Snooze' : 'Tap Complete or Snooze',
-      const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
-      payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
-    );
+    try {
+      await _plugin.show(
+        _alarmId(taskId),
+        'Overdue: $taskName',
+        spaceName.isNotEmpty ? 'Space: $spaceName · tap Complete or Snooze' : 'Tap Complete or Snooze',
+        const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
+        payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
+      );
+    } catch (_) {}
     // AlarmKit has no "fire immediately" call -- a few seconds out is the
     // closest equivalent and is indistinguishable from instant to a person.
     await _scheduleAlarmKitAlarm(

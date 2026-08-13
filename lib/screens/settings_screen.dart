@@ -203,13 +203,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
                     'On some phones (Vivo, Xiaomi, Oppo, Huawei, OnePlus) the alarm can still '
                     'be silently cancelled the moment you swipe the app away, unless you also '
                     'allow it in the phone\'s own "Autostart" or "App management" settings — '
-                    'a step no in-app permission covers.',
+                    'a step no in-app permission covers. This button jumps straight to that '
+                    'screen where possible; on some newer phones it can only open this app\'s '
+                    'own "App info" page instead — from there, look for "Battery" and turn off '
+                    'any restriction, or enable "Autostart"/"Allow background activity".',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                   const SizedBox(height: Gap.md),
                   OutlinedButton(
                     onPressed: _openAutoStart,
-                    child: Text(_autoStartTried ? 'Open autostart settings again' : 'Open autostart settings'),
+                    child: Text(_autoStartTried ? 'Open background settings again' : 'Open background settings'),
                   ),
                   const Divider(height: Gap.xl * 1.5),
                   Text(

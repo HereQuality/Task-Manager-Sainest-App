@@ -25,7 +25,33 @@ class AuthNotifier extends StateNotifier<AuthState> {
   final _dio = ApiClient.instance;
 
   Future<void> _restoreSession() async {
-    final token = await _dio.readToken();
+    String? token;
+    bool rememberMe;
+    try {
+      token = await _dio.readToken();
+      rememberMe = await _dio.readRememberMe();
+    } catch (_) {
+      // Android's EncryptedSharedPreferences can throw here on some
+      // devices -- AEADBadTagException / KeyStoreException "Signature/MAC
+      // verification failed" -- observed in practice right after the OS
+      // silently kills this app in the background (e.g. while a heavier
+      // foreground app like the system file/document picker is open) and
+      // then cold-restarts it: the Keystore-backed cipher that encrypts
+      // this storage came back unreadable on the fresh process. Left
+      // unguarded, this exception had nowhere to go -- it broke
+      // AuthNotifier's constructor before `state` was ever set past its
+      // default AuthStatus.unknown, and router.dart deliberately keeps
+      // showing the Splash screen for as long as that lasts (so a
+      // still-loading session never flashes the login form). The result
+      // was an app that looked permanently stuck/crashed on Splash after
+      // exactly this kind of background restart. Falling back to a clean
+      // "not authenticated" state at least gets the person to the login
+      // screen instead of a screen that never resolves -- they'll just
+      // need to sign back in once, same as if the token had genuinely
+      // expired.
+      state = state.copyWith(status: AuthStatus.unauthenticated);
+      return;
+    }
     if (token == null) {
       state = state.copyWith(status: AuthStatus.unauthenticated);
       return;
@@ -35,7 +61,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
     // session (see ApiClient's request interceptor), but a fresh cold
     // start honors the preference by discarding it here instead of
     // silently logging the person back in.
-    if (!await _dio.readRememberMe()) {
+    if (!rememberMe) {
       await _dio.clearToken();
       await _dio.clearRememberMe();
       state = state.copyWith(status: AuthStatus.unauthenticated);

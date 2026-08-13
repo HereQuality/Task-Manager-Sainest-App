@@ -2,10 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../core/theme.dart';
+import '../core/pending_attachment_service.dart';
 import '../providers/auth_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/status_pill.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/task_checklist_section.dart';
+import '../widgets/task_subtasks_section.dart';
+import '../widgets/task_attachments_section.dart';
+import '../widgets/task_comments_section.dart';
 
 const _statuses = ['TO DO', 'IN PROGRESS', 'COMPLETE'];
 
@@ -27,6 +32,27 @@ class TaskDetailScreen extends ConsumerStatefulWidget {
 
 class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
   bool _updating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Consumes router.dart's redirect trigger for a recovered task
+    // attachment (see pending_attachment_service.dart) -- same deferred
+    // clear AlarmScreen already uses for pendingAlarmNotifier, and for the
+    // same reason: clearing it synchronously here would notify the
+    // router's refreshListenable WHILE this screen is still being built as
+    // part of that very redirect, which crashes with "setState() or
+    // markNeedsBuild() called during build". Only clears it when it's
+    // actually THIS task, so opening some other task while a recovery is
+    // still in flight elsewhere doesn't cancel that redirect.
+    if (pendingAttachmentTaskNotifier.value == widget.taskId) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (pendingAttachmentTaskNotifier.value == widget.taskId) {
+          pendingAttachmentTaskNotifier.value = null;
+        }
+      });
+    }
+  }
 
   Future<void> _setStatus(String status) async {
     setState(() => _updating = true);
@@ -311,6 +337,18 @@ class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
                 const SizedBox(height: Gap.sm),
                 Text(description, style: Theme.of(context).textTheme.bodyMedium),
               ],
+
+              const SizedBox(height: Gap.xl),
+              TaskChecklistSection(taskId: widget.taskId, checklists: (t['checklists'] as List?) ?? const []),
+
+              const SizedBox(height: Gap.xl),
+              TaskSubtasksSection(taskId: widget.taskId),
+
+              const SizedBox(height: Gap.xl),
+              TaskAttachmentsSection(taskId: widget.taskId, attachments: (t['attachments'] as List?) ?? const []),
+
+              const SizedBox(height: Gap.xl),
+              TaskCommentsSection(taskId: widget.taskId, comments: (t['comments'] as List?) ?? const []),
             ],
           );
         },

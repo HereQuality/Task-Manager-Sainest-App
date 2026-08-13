@@ -1,7 +1,7 @@
 name: hqepl_mobile
 description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
 publish_to: 'none'
-version: 1.0.0+12
+version: 1.0.0+22
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -41,9 +41,33 @@ dependencies:
   # service even after Android has killed it outright.
   android_alarm_manager_plus: ^4.0.4
   # Optional screenshot attachment on a new support ticket -- matches
-  # NewTicketModal.jsx's image picker on the web.
+  # NewTicketModal.jsx's image picker on the web; also backs the Task
+  # detail screen's "Take photo" attachment option.
   image_picker: ^1.1.2
   flutter_alarmkit: ^0.4.0
+  # Task detail screen: "Choose document" attachment option (any file
+  # type, matching the server's uploadTaskAttachment). file_picker was
+  # tried first but both its 8.x and 11.x lines hit native Android build
+  # breaks in this project's Gradle setup (a compileSdk mismatch on 8.x,
+  # a Kotlin-registration failure on 11.x) -- file_selector is Flutter's
+  # own favorite-listed package for this and built cleanly.
+  file_selector: ^1.0.3
+  # Task detail screen: record a voice message for the comment thread.
+  # Pinned to the latest major, not ^5.x -- 5.2.1's own federated
+  # sub-packages (record_linux/record_platform_interface) resolved to an
+  # inconsistent combination by default (record_linux 0.7.2 doesn't
+  # implement record_platform_interface 1.6.0's full API), which broke
+  # the Android release build even though Linux isn't a target platform
+  # here. 7.x resolves to a self-consistent set.
+  record: ^7.0.0
+  # Task detail screen: play back a voice message from the comment thread.
+  just_audio: ^0.9.42
+  # Where record writes its temporary audio file, and where a picked
+  # document's path is confirmed to exist before uploading.
+  path_provider: ^2.1.4
+  # Opens a non-image task attachment (PDF, doc, etc.) in whatever app the
+  # phone already has for it, since this app has no in-app document viewer.
+  url_launcher: ^6.3.1
 
 dev_dependencies:
   flutter_test:
