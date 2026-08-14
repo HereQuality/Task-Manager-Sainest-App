@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/router.dart';
 import 'core/theme.dart';
@@ -209,6 +210,21 @@ class _HqeplAppState extends ConsumerState<HqeplApp> with WidgetsBindingObserver
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(),
       routerConfig: router,
+      // en-GB (not the device's own system locale) so every Material
+      // date picker's manual keyboard-entry field reads DD/MM/YYYY
+      // everywhere in the app, matching the day-before-month order every
+      // other displayed date already uses (DateFormat('MMM d, yyyy') --
+      // "13 Aug, 2026") -- see pubspec.yaml's flutter_localizations entry
+      // for why this needs the SDK's localization delegates below to
+      // actually take effect rather than silently falling back to the
+      // device's own locale.
+      locale: const Locale('en', 'GB'),
+      supportedLocales: const [Locale('en', 'GB')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
     );
   }
 }

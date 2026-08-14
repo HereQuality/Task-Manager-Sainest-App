@@ -157,7 +157,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
     final spacesAsync = ref.watch(spacesProvider);
     final employeesAsync = ref.watch(assignableEmployeesProvider);
     final currentUserId = ref.watch(authProvider).user?.id;
-    final dateFmt = DateFormat('MMM d, yyyy');
+    final dateFmt = DateFormat('dd/MM/yyyy');
 
     return Padding(
       padding: EdgeInsets.only(

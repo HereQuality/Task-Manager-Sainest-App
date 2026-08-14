@@ -1,13 +1,22 @@
 name: hqepl_mobile
 description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
 publish_to: 'none'
-version: 1.0.0+22
+version: 1.0.0+25
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
 
 dependencies:
   flutter:
+    sdk: flutter
+  # Locks every Material date picker (task/subtask create, Start/Due
+  # fields) to en-GB's DD/MM/YYYY entry format app-wide, regardless of
+  # the device's own system locale -- without this, showDatePicker's
+  # manual keyboard-entry mode follows whatever locale the phone happens
+  # to be set to, which reads MM/DD/YYYY on a US-locale device even
+  # though every other date in this app (DateFormat('MMM d, yyyy') etc.)
+  # is day-before-month. See main.dart's MaterialApp.router.
+  flutter_localizations:
     sdk: flutter
   cupertino_icons: ^1.0.6
 
@@ -24,7 +33,10 @@ dependencies:
   flutter_secure_storage: ^9.2.2
 
   # Utilities
-  intl: ^0.19.0
+  # Pinned to exactly what flutter_localizations (added above, for the
+  # DD/MM/YYYY date-picker locale) requires from the SDK -- pub's own
+  # solver rejects ^0.19.0 once flutter_localizations is a dependency.
+  intl: ^0.20.2
   cached_network_image: ^3.3.1
   table_calendar: ^3.1.2
   google_fonts: ^6.2.1

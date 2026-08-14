@@ -664,7 +664,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
 }
 
 String _dueRangeLabel(DateTime? from, DateTime? to) {
-  String fmt(DateTime d) => '${d.month}/${d.day}';
+  String fmt(DateTime d) => '${d.day}/${d.month}';
   if (from != null && to != null) return '${fmt(from)}–${fmt(to)}';
   if (from != null) return 'From ${fmt(from)}';
   if (to != null) return 'Until ${fmt(to)}';
@@ -1060,7 +1060,7 @@ class _DateField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = value == null ? 'Not set' : '${value!.month}/${value!.day}/${value!.year}';
+    final text = value == null ? 'Not set' : '${value!.day}/${value!.month}/${value!.year}';
     return InkWell(
       onTap: enabled ? onTap : null,
       borderRadius: BorderRadius.circular(AppRadius.field),

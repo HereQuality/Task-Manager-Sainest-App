@@ -182,7 +182,7 @@ class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
           final assigneeName = assignee?['employeeName']?.toString();
           final priority = t['priority']?.toString();
           final description = (t['description'] ?? '').toString();
-          final dateFmt = DateFormat('MMM d, yyyy');
+          final dateFmt = DateFormat('dd/MM/yyyy');
           final startDate = _parseDate(t['startDate']);
           final dueDate = _parseDate(t['dueDate']);
           final spaceName = t['spaceName']?.toString();

@@ -93,13 +93,31 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
   Future<void> _snooze(Duration duration) async {
     if (_taskId.isEmpty || _busy || !mounted) return;
     setState(() => _busy = true);
-    await NotificationService.instance.snoozeOverdueAlarm(
-      taskId: _taskId,
-      taskName: _taskName,
-      spaceName: _spaceName,
-      duration: duration,
-    );
-    if (mounted) context.go('/home');
+    try {
+      // Unlike completeOverdueTask/cancelOverdueAlarm below (both
+      // best-effort -- their own internals swallow every error), this can
+      // genuinely throw: scheduleOverdueAlarmAt deliberately rethrows a
+      // failed zonedSchedule call (see its own doc comment) so a caller
+      // that cares can tell "scheduled" apart from "silently didn't".
+      // Without this try/catch, that exception used to propagate straight
+      // out of this async callback uncaught -- _busy stayed true forever
+      // (nothing below it ever ran to reset it) and every button on this
+      // screen (Snooze/End/Complete are all gated on _busy) went dead,
+      // trapping the person on a still-ringing alarm with no way off it.
+      await NotificationService.instance.snoozeOverdueAlarm(
+        taskId: _taskId,
+        taskName: _taskName,
+        spaceName: _spaceName,
+        duration: duration,
+      );
+      if (mounted) context.go('/home');
+    } catch (_) {
+      if (mounted) {
+        setState(() => _busy = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Could not snooze this alarm — try again.')));
+      }
+    }
   }
 
   // "End" -- silences this ringing/pending alarm without marking the task

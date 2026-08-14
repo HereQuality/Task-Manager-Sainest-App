@@ -170,7 +170,7 @@ class _TaskCommentsSectionState extends ConsumerState<TaskCommentsSection> {
   @override
   Widget build(BuildContext context) {
     final currentUserId = ref.watch(authProvider).user?.id;
-    final dateFmt = DateFormat('MMM d, h:mm a');
+    final dateFmt = DateFormat('dd/MM/yyyy, h:mm a');
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

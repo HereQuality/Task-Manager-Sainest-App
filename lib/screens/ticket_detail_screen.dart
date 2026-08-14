@@ -87,7 +87,7 @@ class _TicketDetailScreenState extends ConsumerState<TicketDetailScreen> {
           // manage it -- see the class doc above.
           final canManage = !isOwner;
           final comments = (t['comments'] as List?) ?? [];
-          final dateFmt = DateFormat('MMM d, h:mm a');
+          final dateFmt = DateFormat('dd/MM/yyyy, h:mm a');
 
           return Column(
             children: [
