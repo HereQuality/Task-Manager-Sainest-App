@@ -1,11 +1,30 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api_client.dart';
 import 'auth_provider.dart';
 
+/// Set from Dashboard's stat cards (Total tasks/On time completion/
+/// Overdue/In progress/Delayed) to jump straight to the Tasks tab
+/// pre-filtered to that category. Consumed once by TasksScreen's own
+/// listener and reset back to null immediately after -- same
+/// signal-then-clear pattern as notification_service.dart's
+/// pendingAlarmNotifier and pending_attachment_service.dart's
+/// pendingAttachmentTaskNotifier. An empty set is a real, distinct value
+/// from null here: it means "switch to Tasks with every status filter
+/// cleared" (the Total tasks card), not "nothing pending".
+final pendingTaskStatusFilter = ValueNotifier<Set<String>?>(null);
+
+/// Set alongside pendingTaskStatusFilter above so HomeShell's bottom-nav
+/// index actually switches to the Tasks tab when a stat card is tapped --
+/// DashboardScreen has no direct reference to HomeShell's own tab-index
+/// state, so this is the same kind of cross-screen signal.
+final pendingHomeTabIndex = ValueNotifier<int?>(null);
+
 /// Every task assigned to the logged-in user, across every Space --
 /// GET /api/v1/tasks/mine/all (same endpoint the web Calendar page uses).
-final myTasksProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
+final myTasksProvider =
+    FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
   try {
     final res = await ApiClient.instance.dio.get('/tasks/mine/all');
     final data = res.data['data'] ?? res.data['tasks'] ?? [];
@@ -28,7 +47,8 @@ final myTasksProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((
 // this one account's own numbers, which is what the mobile Home
 // screen's ATS/OTC cards are meant to show (same personal scope as
 // myTasksProvider's "/tasks/mine/all" above).
-final dashboardStatsProvider = FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
+final dashboardStatsProvider =
+    FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
   final user = ref.watch(authProvider).user;
   final res = await ApiClient.instance.dio.get(
     '/tasks/dashboard-stats',
@@ -51,7 +71,8 @@ Future<void> updateTaskStatus(String taskId, String status) async {
 /// and that file for the two places this gets called from.
 Future<List<Map<String, dynamic>>> fetchTeamOverdueEscalations() async {
   try {
-    final res = await ApiClient.instance.dio.get('/tasks/team/overdue-escalations');
+    final res =
+        await ApiClient.instance.dio.get('/tasks/team/overdue-escalations');
     final data = res.data['data'] ?? [];
     return List<Map<String, dynamic>>.from(data);
   } on DioException catch (e) {
@@ -83,7 +104,8 @@ Future<List<Map<String, dynamic>>> fetchPendingApprovals() async {
 /// screen's own "DELEGATED" section -- the plain function itself stays,
 /// since background_watcher_service.dart's isolate still needs to call it
 /// with no ProviderScope available.
-final pendingApprovalsProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) {
+final pendingApprovalsProvider =
+    FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) {
   return fetchPendingApprovals();
 });
 
@@ -107,7 +129,8 @@ Future<void> rejectTaskCompletion(String taskId, {String? reason}) async {
 
 /// A task's subtasks -- GET /api/v1/tasks/:id/subtasks (same endpoint
 /// TaskDetailModal.jsx's Subtasks panel uses).
-final subtasksProvider = FutureProvider.autoDispose.family<List<Map<String, dynamic>>, String>((ref, taskId) async {
+final subtasksProvider = FutureProvider.autoDispose
+    .family<List<Map<String, dynamic>>, String>((ref, taskId) async {
   final res = await ApiClient.instance.dio.get('/tasks/$taskId/subtasks');
   final data = res.data['data'] ?? [];
   return List<Map<String, dynamic>>.from(data);
@@ -121,7 +144,8 @@ final subtasksProvider = FutureProvider.autoDispose.family<List<Map<String, dyna
 /// on the go; a subtask needing more detail can be opened and edited
 /// afterward like any other task.
 Future<void> createSubtask(String parentTaskId, {required String name}) async {
-  await ApiClient.instance.dio.post('/tasks/$parentTaskId/subtasks', data: {'name': name});
+  await ApiClient.instance.dio
+      .post('/tasks/$parentTaskId/subtasks', data: {'name': name});
 }
 
 /// Replaces a task's whole checklists array -- PUT /api/v1/tasks/:id
@@ -129,8 +153,10 @@ Future<void> createSubtask(String parentTaskId, {required String name}) async {
 /// app uses (Task.js's own doc comment: "same as tags"). The caller is
 /// expected to send the FULL array (existing checklists/items plus
 /// whatever just changed), not a partial patch.
-Future<void> updateTaskChecklists(String taskId, List<Map<String, dynamic>> checklists) async {
-  await ApiClient.instance.dio.put('/tasks/$taskId', data: {'checklists': checklists});
+Future<void> updateTaskChecklists(
+    String taskId, List<Map<String, dynamic>> checklists) async {
+  await ApiClient.instance.dio
+      .put('/tasks/$taskId', data: {'checklists': checklists});
 }
 
 /// Uploads a file to a task -- POST /api/v1/tasks/:id/attachments,
@@ -142,7 +168,8 @@ Future<void> uploadTaskAttachment(String taskId, String filePath) async {
     // lookupMediaType is required -- see createTicket's own doc comment
     // in tickets_provider.dart for why fromFile alone silently sends
     // application/octet-stream instead of the file's real type.
-    'file': await MultipartFile.fromFile(filePath, contentType: MultipartFile.lookupMediaType(filePath)),
+    'file': await MultipartFile.fromFile(filePath,
+        contentType: MultipartFile.lookupMediaType(filePath)),
   });
   await ApiClient.instance.dio.post(
     '/tasks/$taskId/attachments',
@@ -155,13 +182,15 @@ Future<void> uploadTaskAttachment(String taskId, String filePath) async {
 /// who's allowed (the task's delegator/delegate, or SuperAdmin/Teams-
 /// Full-Access; see assertCanEditTask in task.controller.js).
 Future<void> deleteTaskAttachment(String taskId, String attachmentId) async {
-  await ApiClient.instance.dio.delete('/tasks/$taskId/attachments/$attachmentId');
+  await ApiClient.instance.dio
+      .delete('/tasks/$taskId/attachments/$attachmentId');
 }
 
 /// Posts a text message to a task's comment thread -- POST
 /// /api/v1/tasks/:id/comments {message}.
 Future<void> addTaskTextComment(String taskId, String message) async {
-  await ApiClient.instance.dio.post('/tasks/$taskId/comments', data: {'message': message});
+  await ApiClient.instance.dio
+      .post('/tasks/$taskId/comments', data: {'message': message});
 }
 
 /// Posts a recorded voice message to a task's comment thread -- same
@@ -169,10 +198,12 @@ Future<void> addTaskTextComment(String taskId, String message) async {
 /// (matches uploadTaskCommentAudio.single("audio") server-side) plus how
 /// long the recording runs, so the UI can show a duration without
 /// decoding the audio file itself.
-Future<void> addTaskAudioComment(String taskId, String audioPath, {required int durationSeconds}) async {
+Future<void> addTaskAudioComment(String taskId, String audioPath,
+    {required int durationSeconds}) async {
   final formData = FormData.fromMap({
     'durationSeconds': durationSeconds,
-    'audio': await MultipartFile.fromFile(audioPath, contentType: MultipartFile.lookupMediaType(audioPath)),
+    'audio': await MultipartFile.fromFile(audioPath,
+        contentType: MultipartFile.lookupMediaType(audioPath)),
   });
   await ApiClient.instance.dio.post(
     '/tasks/$taskId/comments',
@@ -192,7 +223,8 @@ Future<void> deleteTaskComment(String taskId, String commentId) async {
 /// TaskDetailModal.jsx uses on the web). Backs the Task Detail screen
 /// opened by tapping a task card anywhere (Tasks tab, Home's "Due soon",
 /// or a day's tasks on the Calendar tab).
-final taskDetailProvider = FutureProvider.autoDispose.family<Map<String, dynamic>, String>((ref, taskId) async {
+final taskDetailProvider = FutureProvider.autoDispose
+    .family<Map<String, dynamic>, String>((ref, taskId) async {
   final res = await ApiClient.instance.dio.get('/tasks/$taskId');
   return Map<String, dynamic>.from(res.data['data'] ?? {});
 });

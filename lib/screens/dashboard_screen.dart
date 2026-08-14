@@ -7,6 +7,7 @@ import '../providers/notifications_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/entity_card.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/task_meta_chips.dart';
 
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
@@ -18,16 +19,31 @@ class DashboardScreen extends ConsumerWidget {
     return 'Good evening';
   }
 
+  // Jumps to the Tasks tab pre-filtered to match whichever stat card was
+  // tapped -- see pendingTaskStatusFilter/pendingHomeTabIndex's own doc
+  // comments in tasks_provider.dart for how TasksScreen/HomeShell pick
+  // these up. [statuses] uses the same keys as _statusFacetOptions in
+  // tasks_screen.dart (TO DO/IN PROGRESS/OVERDUE/COMPLETE/COMPLETE_LATE);
+  // an empty set clears every status filter, for the Total tasks card.
+  void _openTasksFiltered(Set<String> statuses) {
+    pendingTaskStatusFilter.value = statuses;
+    pendingHomeTabIndex.value =
+        1; // Tasks is nav-slot/page index 1 -- see home_shell.dart
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final user = ref.watch(authProvider).user;
     final statsAsync = ref.watch(dashboardStatsProvider);
     final tasksAsync = ref.watch(myTasksProvider);
-    final unread = ref.watch(unreadNotificationCountProvider).maybeWhen(data: (n) => n, orElse: () => 0);
+    final unread = ref
+        .watch(unreadNotificationCountProvider)
+        .maybeWhen(data: (n) => n, orElse: () => 0);
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('${_greeting()}${user != null ? ", ${user.name.split(' ').first}" : ''}'),
+        title: Text(
+            '${_greeting()}${user != null ? ", ${user.name.split(' ').first}" : ''}'),
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: Gap.md),
@@ -48,26 +64,32 @@ class DashboardScreen extends ConsumerWidget {
                 alignment: Alignment.centerLeft,
                 child: Container(
                   margin: const EdgeInsets.only(bottom: Gap.lg),
-                  padding: const EdgeInsets.symmetric(horizontal: Gap.md, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: Gap.md, vertical: 6),
                   decoration: BoxDecoration(
                     color: AppColors.indigoSoft,
                     borderRadius: BorderRadius.circular(AppRadius.chip),
                   ),
                   child: Text(
                     user!.roleName!,
-                    style: const TextStyle(color: AppColors.indigo, fontWeight: FontWeight.w700, fontSize: 12.5),
+                    style: const TextStyle(
+                        color: AppColors.indigo,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12.5),
                   ),
                 ),
               ),
             statsAsync.when(
               data: (stats) {
                 final totalTask = (stats['totalTask'] as num?)?.toDouble() ?? 0;
-                final onTimeCompletion = (stats['onTimeCompletion'] as num?)?.toDouble() ?? 0;
+                final onTimeCompletion =
+                    (stats['onTimeCompletion'] as num?)?.toDouble() ?? 0;
                 final overdue = (stats['overdue'] as num?) ?? 0;
                 final inProgress = (stats['inProgress'] as num?) ?? 0;
                 final delayed = (stats['delayed'] as num?) ?? 0;
                 final atsScore = (stats['atsScore'] as num?)?.toDouble() ?? 0;
-                final otcPct = totalTask > 0 ? (onTimeCompletion / totalTask) * 100 : 0;
+                final otcPct =
+                    totalTask > 0 ? (onTimeCompletion / totalTask) * 100 : 0;
 
                 return GridView.count(
                   shrinkWrap: true,
@@ -77,13 +99,51 @@ class DashboardScreen extends ConsumerWidget {
                   crossAxisSpacing: Gap.md,
                   childAspectRatio: 1.5,
                   children: [
-                    _StatCard(label: 'Total tasks', value: '${totalTask.toInt()}', color: AppColors.indigo, icon: Icons.stacked_bar_chart_rounded),
-                    _StatCard(label: 'On time completion', value: '${onTimeCompletion.toInt()}', color: AppColors.success, icon: Icons.check_circle_outline_rounded),
-                    _StatCard(label: 'Overdue', value: '$overdue', color: AppColors.danger, icon: Icons.error_outline_rounded),
-                    _StatCard(label: 'In progress', value: '$inProgress', color: AppColors.warning, icon: Icons.timelapse_rounded),
-                    _StatCard(label: 'Delayed', value: '$delayed', color: AppColors.warning, icon: Icons.hourglass_bottom_rounded),
-                    _StatCard(label: 'ATS Score', value: '${atsScore.toStringAsFixed(1)}%', color: AppColors.indigo, icon: Icons.speed_rounded),
-                    _StatCard(label: 'OTC', value: '${otcPct.toStringAsFixed(1)}%', color: AppColors.success, icon: Icons.check_circle_outline_rounded),
+                    _StatCard(
+                      label: 'Total tasks',
+                      value: '${totalTask.toInt()}',
+                      color: AppColors.indigo,
+                      icon: Icons.stacked_bar_chart_rounded,
+                      onTap: () => _openTasksFiltered(const {}),
+                    ),
+                    _StatCard(
+                      label: 'On time completion',
+                      value: '${onTimeCompletion.toInt()}',
+                      color: AppColors.success,
+                      icon: Icons.check_circle_outline_rounded,
+                      onTap: () => _openTasksFiltered(const {'COMPLETE'}),
+                    ),
+                    _StatCard(
+                      label: 'Overdue',
+                      value: '$overdue',
+                      color: AppColors.danger,
+                      icon: Icons.error_outline_rounded,
+                      onTap: () => _openTasksFiltered(const {'OVERDUE'}),
+                    ),
+                    _StatCard(
+                      label: 'In progress',
+                      value: '$inProgress',
+                      color: AppColors.warning,
+                      icon: Icons.timelapse_rounded,
+                      onTap: () => _openTasksFiltered(const {'IN PROGRESS'}),
+                    ),
+                    _StatCard(
+                      label: 'Delayed',
+                      value: '$delayed',
+                      color: AppColors.warning,
+                      icon: Icons.hourglass_bottom_rounded,
+                      onTap: () => _openTasksFiltered(const {'COMPLETE_LATE'}),
+                    ),
+                    _StatCard(
+                        label: 'ATS Score',
+                        value: '${atsScore.toStringAsFixed(1)}%',
+                        color: AppColors.indigo,
+                        icon: Icons.speed_rounded),
+                    _StatCard(
+                        label: 'OTC',
+                        value: '${otcPct.toStringAsFixed(1)}%',
+                        color: AppColors.success,
+                        icon: Icons.check_circle_outline_rounded),
                   ],
                 );
               },
@@ -93,42 +153,67 @@ class DashboardScreen extends ConsumerWidget {
               ),
               error: (e, _) => Padding(
                 padding: const EdgeInsets.symmetric(vertical: Gap.lg),
-                child: Text('Stats unavailable right now.', style: Theme.of(context).textTheme.bodyMedium),
+                child: Text('Stats unavailable right now.',
+                    style: Theme.of(context).textTheme.bodyMedium),
               ),
             ),
             const SizedBox(height: Gap.xl),
-            Text('Due soon', style: Theme.of(context).textTheme.titleLarge),
+            Text("Today's tasks",
+                style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: Gap.md),
             tasksAsync.when(
               data: (tasks) {
-                final upcoming = tasks.where((t) {
+                final now = DateTime.now();
+                // myTasksProvider ("/tasks/mine/all") mixes a manager/
+                // senior's own tasks together with every subordinate's
+                // (see listMyTasksAll in task.controller.js) -- this
+                // section is scoped to just the logged-in person's own
+                // work, same "Mine" default the Tasks screen itself now
+                // uses, so the assignee check below is what actually
+                // narrows it rather than relying on the endpoint alone.
+                final today = tasks.where((t) {
+                  final assigneeRaw = t['assigneeId'];
+                  final assigneeId =
+                      (assigneeRaw is Map ? assigneeRaw['_id'] : assigneeRaw)
+                          ?.toString();
+                  if (assigneeId == null || assigneeId != user?.id)
+                    return false;
                   final due = t['dueDate'];
                   if (due == null) return false;
                   final d = DateTime.tryParse(due.toString());
                   if (d == null) return false;
                   final status = (t['status'] ?? '').toString().toLowerCase();
-                  return !status.contains('complete') && d.difference(DateTime.now()).inDays <= 3;
+                  if (status.contains('complete')) return false;
+                  return d.year == now.year &&
+                      d.month == now.month &&
+                      d.day == now.day;
                 }).toList()
-                  ..sort((a, b) => DateTime.parse(a['dueDate']).compareTo(DateTime.parse(b['dueDate'])));
+                  ..sort((a, b) => DateTime.parse(a['dueDate'])
+                      .compareTo(DateTime.parse(b['dueDate'])));
 
-                if (upcoming.isEmpty) {
+                if (today.isEmpty) {
                   return const EmptyState(
                     icon: Icons.beach_access_outlined,
-                    title: 'Nothing due soon',
-                    message: "You're clear for the next few days.",
+                    title: 'Nothing due today',
+                    message: "You're clear for today.",
                   );
                 }
                 return Column(
-                  children: upcoming.take(5).map((t) {
+                  children: today.map((t) {
                     final spaceName = t['spaceName']?.toString();
-                    final dueText = 'Due ${t['dueDate'].toString().split('T').first}';
                     return Padding(
                       padding: const EdgeInsets.only(bottom: Gap.sm),
                       child: EntityCard(
                         title: t['title'] ?? t['name'] ?? 'Untitled task',
                         status: t['status'] ?? 'pending',
                         leadingIcon: Icons.task_alt_rounded,
-                        subtitle: spaceName != null && spaceName.isNotEmpty ? '$dueText · $spaceName' : dueText,
+                        subtitle: spaceName != null && spaceName.isNotEmpty
+                            ? spaceName
+                            : null,
+                        // Same chip set every other task row in the app
+                        // uses (see task_meta_chips.dart) -- due date,
+                        // priority, assigned by/to.
+                        metaRow: taskMetaRow(t, currentUserId: user?.id),
                         onTap: () => context.push('/home/tasks/${t['_id']}'),
                       ),
                     );
@@ -136,7 +221,8 @@ class DashboardScreen extends ConsumerWidget {
                 );
               },
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) => Text('Could not load tasks.', style: Theme.of(context).textTheme.bodyMedium),
+              error: (e, _) => Text('Could not load tasks.',
+                  style: Theme.of(context).textTheme.bodyMedium),
             ),
           ],
         ),
@@ -150,55 +236,67 @@ class _StatCard extends StatelessWidget {
   final String value;
   final Color color;
   final IconData icon;
-  const _StatCard({required this.label, required this.value, required this.color, required this.icon});
+  final VoidCallback? onTap;
+  const _StatCard(
+      {required this.label,
+      required this.value,
+      required this.color,
+      required this.icon,
+      this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(Gap.lg),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(9)),
-              child: Icon(icon, color: color, size: 17),
-            ),
-            // This card's height is fixed by the parent GridView's
-            // childAspectRatio, not sized to content -- maxLines/ellipsis
-            // alone still overflows if the icon+value+label together are
-            // just taller than that fixed height on a given screen size or
-            // system font-scale setting (seen on an iPhone 13 running iOS
-            // 18, not just accessibility settings). Expanded+FittedBox
-            // gives each text its bounded share of the remaining height
-            // and shrinks it to fit instead, which can't overflow on any
-            // device regardless of exact metrics.
-            Expanded(
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  value,
-                  maxLines: 1,
-                  style: Theme.of(context).textTheme.headlineSmall,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(Gap.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                    color: color.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(9)),
+                child: Icon(icon, color: color, size: 17),
+              ),
+              // This card's height is fixed by the parent GridView's
+              // childAspectRatio, not sized to content -- maxLines/ellipsis
+              // alone still overflows if the icon+value+label together are
+              // just taller than that fixed height on a given screen size or
+              // system font-scale setting (seen on an iPhone 13 running iOS
+              // 18, not just accessibility settings). Expanded+FittedBox
+              // gives each text its bounded share of the remaining height
+              // and shrinks it to fit instead, which can't overflow on any
+              // device regardless of exact metrics.
+              Expanded(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
                 ),
               ),
-            ),
-            Expanded(
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  label,
-                  maxLines: 2,
-                  style: Theme.of(context).textTheme.bodyMedium,
+              Expanded(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    label,
+                    maxLines: 2,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -226,12 +324,17 @@ class _NotificationBell extends StatelessWidget {
                 top: -2,
                 child: Container(
                   padding: const EdgeInsets.all(3),
-                  constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-                  decoration: const BoxDecoration(color: AppColors.danger, shape: BoxShape.circle),
+                  constraints:
+                      const BoxConstraints(minWidth: 16, minHeight: 16),
+                  decoration: const BoxDecoration(
+                      color: AppColors.danger, shape: BoxShape.circle),
                   child: Text(
                     count > 9 ? '9+' : '$count',
                     textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700),
                   ),
                 ),
               ),

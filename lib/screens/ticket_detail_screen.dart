@@ -80,8 +80,10 @@ class _TicketDetailScreenState extends ConsumerState<TicketDetailScreen> {
           final escalated = t['escalatedToAdmin'] == true;
           final raisedBy = t['raisedBy'] is Map ? t['raisedBy'] as Map : null;
           final raiserId = raisedBy?['_id']?.toString();
-          final raiserName = raisedBy?['employeeName']?.toString() ?? 'Someone';
           final isOwner = raiserId != null && raiserId == currentUserId;
+          // "Me" instead of the logged-in person's own name, same
+          // shorthand used elsewhere in the app.
+          final raiserName = isOwner ? 'Me' : (raisedBy?['employeeName']?.toString() ?? 'Someone');
           // A ticket that showed up here despite not being this person's
           // own is only possible if the server already decided they can
           // manage it -- see the class doc above.

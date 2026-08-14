@@ -79,7 +79,15 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: 'tasks/:id',
-            builder: (context, state) => TaskDetailScreen(taskId: state.pathParameters['id']!),
+            // extra carries the ordered list of task ids from whichever
+            // screen this was pushed from (see TaskDetailScreen's own doc
+            // comment) -- optional, so callers with no meaningful list
+            // (a subtask row, Dashboard, Calendar) can just omit it.
+            builder: (context, state) {
+              final extra = state.extra;
+              final taskIds = extra is List ? extra.map((e) => e.toString()).toList() : null;
+              return TaskDetailScreen(taskId: state.pathParameters['id']!, taskIds: taskIds);
+            },
           ),
           GoRoute(path: 'alarm', builder: (context, state) => const AlarmScreen()),
         ],

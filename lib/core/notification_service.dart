@@ -15,6 +15,30 @@ const _askedBatteryOptKey = 'asked_battery_opt_once';
 const _askedFullScreenIntentKey = 'asked_full_screen_intent_once';
 const _askedAlarmKitKey = 'asked_alarmkit_auth_once';
 
+// Same "already alerted" list background_watcher_service.dart's
+// _checkOverdueTasksOnce and notifications_provider.dart's foreground pass
+// both read/write (kept identical by matching key name, same pattern as
+// every other shared key in this app -- see CLAUDE.md). Once a task's id is
+// in here, both of those loops treat it as "already rang, don't ring again"
+// forever, which is exactly right for the FIRST ring -- but a Snooze needs
+// the OPPOSITE: it should be silenced only until the snooze window elapses,
+// then ring again. Without touching this list, Snooze relied solely on the
+// OS-level zonedSchedule/alarmClock call below to bring the alarm back --
+// the very mechanism this app's whole background-watcher architecture
+// exists to work around, because it was found to silently never fire on
+// some OEM devices once the app was swiped from Recents (see CLAUDE.md).
+// So snoozeOverdueAlarm below removes the id from this list AND records a
+// "snoozed until" timestamp (_snoozedUntilKey) so the watcher's own
+// once-a-minute poll -- which normally would re-fire the instant it saw a
+// still-overdue task with no recent alert -- knows to hold off until the
+// snooze duration has actually passed, then rings it as a fresh "just
+// became overdue again" alert through the same reliable path as the first
+// ring.
+const _alertedOverdueIdsKey = 'overdue_alerted_task_ids';
+// taskId -> epoch-millis "don't re-ring before this time" map, JSON-encoded.
+// Same matching-key-name sharing as _alertedOverdueIdsKey above.
+const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
+
 /// Set whenever the overdue alarm needs the app's UI to jump straight to
 /// the full-screen Alarm screen: a cold start via the full-screen-intent
 /// notification (checked in main.dart via getLaunchDetails), or the
@@ -546,22 +570,31 @@ class NotificationService {
   }) async {
     final fireAt = _tzFrom(when);
     try {
-      await _plugin.zonedSchedule(
-        _alarmId(taskId),
-        'Overdue: $taskName',
-        spaceName.isNotEmpty ? 'Space: $spaceName · tap Complete or Snooze' : 'Tap Complete or Snooze',
-        fireAt,
-        const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
-        // alarmClock (AlarmManager.setAlarmClock) is the same, most-privileged
-        // mechanism real alarm-clock apps use -- unlike exactAllowWhileIdle,
-        // Android documents this as exempt from Doze/App Standby deferral
-        // entirely, which is what "fires reliably even once the app's been
-        // closed a while" actually needs. It also shows the small alarm-clock
-        // icon in the status bar while pending.
-        androidScheduleMode: AndroidScheduleMode.alarmClock,
-        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-        payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
-      );
+      // Timeout, not just try/catch: a native platform-channel call that
+      // never completes (as opposed to one that throws) would otherwise
+      // leave this await pending forever -- and every caller here awaits
+      // this directly (the Alarm screen's Snooze button among them), so a
+      // hang here reads as the whole screen freezing with no error, no
+      // fallback, no way out. Same defensive pattern as
+      // _cancelAlarmKitAlarm's own timeout below.
+      await _plugin
+          .zonedSchedule(
+            _alarmId(taskId),
+            'Overdue: $taskName',
+            spaceName.isNotEmpty ? 'Space: $spaceName · tap Complete or Snooze' : 'Tap Complete or Snooze',
+            fireAt,
+            const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
+            // alarmClock (AlarmManager.setAlarmClock) is the same, most-privileged
+            // mechanism real alarm-clock apps use -- unlike exactAllowWhileIdle,
+            // Android documents this as exempt from Doze/App Standby deferral
+            // entirely, which is what "fires reliably even once the app's been
+            // closed a while" actually needs. It also shows the small alarm-clock
+            // icon in the status bar while pending.
+            androidScheduleMode: AndroidScheduleMode.alarmClock,
+            uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+            payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
+          )
+          .timeout(const Duration(seconds: 8));
       // Deliberately printed (not debugPrint-gated) so it survives in
       // release console output too -- this is the one line that proves
       // the OS actually accepted the alarm registration, as opposed to
@@ -661,6 +694,28 @@ class NotificationService {
     await cancelOverdueAlarm(taskId);
   }
 
+  /// Clears [taskId] out of the "already alerted" list and records when
+  /// it's allowed to ring again -- see _alertedOverdueIdsKey/
+  /// _snoozedUntilKey doc comment above. Split out from snoozeOverdueAlarm
+  /// so it can be given its own timeout there without also timing out the
+  /// actual alarm scheduling.
+  Future<void> _markSnoozed(String taskId, DateTime until) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet()..remove(taskId);
+    await prefs.setStringList(_alertedOverdueIdsKey, alertedIds.toList());
+
+    final rawMap = prefs.getString(_snoozedUntilKey);
+    Map<String, dynamic> snoozedUntil = {};
+    if (rawMap != null) {
+      try {
+        snoozedUntil = jsonDecode(rawMap) as Map<String, dynamic>;
+      } catch (_) {}
+    }
+    snoozedUntil[taskId] = until.millisecondsSinceEpoch;
+    await prefs.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
+  }
+
   /// Same "Snooze" action the notification's button performs -- defaults to
   /// 5 minutes out (what the notification tray's own quick-action button
   /// still uses, with no room there to offer a duration choice), but the
@@ -672,11 +727,25 @@ class NotificationService {
     required String spaceName,
     Duration duration = const Duration(minutes: 5),
   }) async {
+    final until = DateTime.now().add(duration);
+
+    // Best-effort, same reasoning as _cancelAlarmKitAlarm's own timeout
+    // above: this is bookkeeping only (see _alertedOverdueIdsKey/
+    // _snoozedUntilKey doc comment), not the actual alarm. If a
+    // SharedPreferences round-trip ever hangs on a device -- the plugin
+    // talks to a native platform channel, which is exactly the kind of
+    // call that can stall -- it must never block the alarm itself from
+    // being (re)scheduled below, and it must never leave the Alarm
+    // screen's Snooze button spinning forever waiting on it.
+    try {
+      await _markSnoozed(taskId, until).timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
     await scheduleOverdueAlarmAt(
       taskId: taskId,
       taskName: taskName,
       spaceName: spaceName,
-      when: DateTime.now().add(duration),
+      when: until,
     );
   }
 }

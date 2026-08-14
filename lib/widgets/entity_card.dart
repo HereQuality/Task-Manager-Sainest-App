@@ -12,6 +12,11 @@ class EntityCard extends StatelessWidget {
   final String? subtitle;
   final IconData leadingIcon;
   final VoidCallback? onTap;
+  // Small icon+label chips (due date, priority, assignee, ...) shown below
+  // the subtitle, one per caller-supplied widget -- kept separate from
+  // subtitle (a single ellipsized line) so callers with several pieces of
+  // per-row metadata don't have to cram them into one truncating string.
+  final List<Widget>? metaRow;
 
   const EntityCard({
     super.key,
@@ -20,6 +25,7 @@ class EntityCard extends StatelessWidget {
     required this.leadingIcon,
     this.subtitle,
     this.onTap,
+    this.metaRow,
   });
 
   @override
@@ -63,6 +69,10 @@ class EntityCard extends StatelessWidget {
                                 overflow: TextOverflow.ellipsis,
                                 style: Theme.of(context).textTheme.bodyMedium,
                               ),
+                            ],
+                            if (metaRow != null && metaRow!.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Wrap(spacing: Gap.sm, runSpacing: 4, children: metaRow!),
                             ],
                           ],
                         ),

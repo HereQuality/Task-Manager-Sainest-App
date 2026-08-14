@@ -22,15 +22,78 @@ const _statuses = ['TO DO', 'IN PROGRESS', 'COMPLETE'];
 /// attachments, dependencies, time tracking) -- the point of the mobile
 /// app is fast triage: see what a task needs and move its status,
 /// not full editing.
-class TaskDetailScreen extends ConsumerStatefulWidget {
+///
+/// [taskIds], when the caller has one (see tasks_screen.dart's onTap),
+/// is the exact ordered list of task ids currently visible on whichever
+/// screen this was opened from -- lets someone swipe left/right straight
+/// to the next/previous task in that same list without backing out to it
+/// and tapping another row. Callers that don't have a meaningful ordered
+/// list (a single task reached from a subtask row, Dashboard, or the
+/// Calendar day view) just omit it, and this screen falls back to
+/// [taskId] alone with no swiping.
+class TaskDetailScreen extends StatefulWidget {
   final String taskId;
-  const TaskDetailScreen({super.key, required this.taskId});
+  final List<String>? taskIds;
+  const TaskDetailScreen({super.key, required this.taskId, this.taskIds});
 
   @override
-  ConsumerState<TaskDetailScreen> createState() => _TaskDetailScreenState();
+  State<TaskDetailScreen> createState() => _TaskDetailScreenState();
 }
 
-class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
+class _TaskDetailScreenState extends State<TaskDetailScreen> {
+  late final List<String> _ids;
+  late int _index;
+  late final PageController _pageController;
+
+  @override
+  void initState() {
+    super.initState();
+    _ids = (widget.taskIds != null && widget.taskIds!.isNotEmpty) ? widget.taskIds! : [widget.taskId];
+    final foundIndex = _ids.indexOf(widget.taskId);
+    _index = foundIndex >= 0 ? foundIndex : 0;
+    _pageController = PageController(initialPage: _index);
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_ids.length > 1 ? 'Task ${_index + 1} of ${_ids.length}' : 'Task'),
+      ),
+      // itemCount/builder rather than a fixed children list -- PageView.builder
+      // only actually builds pages near the current one (same lazy-loading
+      // behavior as ListView.builder), so this stays cheap even for the
+      // Tasks screen's full filtered list (can be 100+ tasks).
+      body: PageView.builder(
+        controller: _pageController,
+        itemCount: _ids.length,
+        onPageChanged: (i) => setState(() => _index = i),
+        itemBuilder: (context, i) => _TaskDetailBody(taskId: _ids[i]),
+      ),
+    );
+  }
+}
+
+/// The actual per-task content -- everything the old single-task
+/// TaskDetailScreen used to render directly, now hosted one-per-page
+/// inside the PageView above so each page keeps its own independent
+/// Riverpod state (status updates, comments, etc.) keyed to its own
+/// taskId.
+class _TaskDetailBody extends ConsumerStatefulWidget {
+  final String taskId;
+  const _TaskDetailBody({required this.taskId});
+
+  @override
+  ConsumerState<_TaskDetailBody> createState() => _TaskDetailBodyState();
+}
+
+class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
   bool _updating = false;
 
   @override
@@ -173,13 +236,16 @@ class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
     final taskAsync = ref.watch(taskDetailProvider(widget.taskId));
     final currentUserId = ref.watch(authProvider).user?.id;
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Task')),
-      body: taskAsync.when(
+    return taskAsync.when(
         data: (t) {
           final status = (t['status'] ?? 'TO DO').toString();
           final assignee = t['assigneeId'] is Map ? t['assigneeId'] as Map : null;
-          final assigneeName = assignee?['employeeName']?.toString();
+          final assigneeId = (assignee?['_id'] ?? (t['assigneeId'] is Map ? null : t['assigneeId']))?.toString();
+          // "Me" instead of the logged-in person's own name, same shorthand
+          // used elsewhere in the app (e.g. the Assign-to picker) -- can
+          // apply to either the assignee or the creator below, since
+          // either one can legitimately be the viewer.
+          final assigneeName = assigneeId != null && assigneeId == currentUserId ? 'Me' : assignee?['employeeName']?.toString();
           final priority = t['priority']?.toString();
           final description = (t['description'] ?? '').toString();
           final dateFmt = DateFormat('dd/MM/yyyy');
@@ -188,15 +254,22 @@ class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
           final spaceName = t['spaceName']?.toString();
           final folderName = t['folderName']?.toString();
 
-          // createdBy comes back as a bare id string, not populated (see
-          // getTask in task.controller.js) -- comparing it directly against
-          // the logged-in person's own id is how this screen tells whether
-          // THEY are the one who delegated this task away, i.e. the only
-          // person the server will actually let approve/reject it.
+          // createdBy is now populated (see getTask in task.controller.js)
+          // as a Map when the server has it, but this screen still has to
+          // handle the bare-id-string shape too -- older cached responses,
+          // or a createdBy that failed to populate (e.g. its model doc was
+          // deleted). Comparing the extracted id against the logged-in
+          // person's own id is how this screen tells whether THEY are the
+          // one who delegated this task away, i.e. the only person the
+          // server will actually let approve/reject it.
+          final createdByRaw = t['createdBy'];
+          final createdById = (createdByRaw is Map ? createdByRaw['_id'] : createdByRaw)?.toString();
           final completionApproval = t['completionApproval'] is Map ? t['completionApproval'] as Map : null;
           final pendingApproval = completionApproval?['status'] == 'PENDING';
-          final createdById = t['createdBy']?.toString();
           final isDelegator = pendingApproval && currentUserId != null && createdById == currentUserId;
+          final assignedByName = createdById != null && currentUserId != null && createdById == currentUserId
+              ? 'Me'
+              : (createdByRaw is Map ? (createdByRaw['employeeName'] ?? createdByRaw['name'])?.toString() : null);
 
           return ListView(
             padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.lg, Gap.lg, Gap.xxl),
@@ -315,6 +388,8 @@ class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
 
               const SizedBox(height: Gap.xl),
               _DetailRow(icon: Icons.person_outline_rounded, label: 'Assigned to', value: assigneeName ?? 'Unassigned'),
+              if (assignedByName != null && assignedByName.isNotEmpty)
+                _DetailRow(icon: Icons.north_east_rounded, label: 'Assigned by', value: assignedByName),
               _DetailRow(
                 icon: Icons.flag_outlined,
                 label: 'Priority',
@@ -357,8 +432,7 @@ class _TaskDetailScreenState extends ConsumerState<TaskDetailScreen> {
           message: 'Could not load this task.',
           onRetry: () => ref.invalidate(taskDetailProvider(widget.taskId)),
         ),
-      ),
-    );
+      );
   }
 
   DateTime? _parseDate(dynamic value) {

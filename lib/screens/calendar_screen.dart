@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:table_calendar/table_calendar.dart';
 import '../core/theme.dart';
+import '../providers/auth_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/entity_card.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/task_meta_chips.dart';
 
 class CalendarScreen extends ConsumerStatefulWidget {
   const CalendarScreen({super.key});
@@ -21,6 +23,7 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
   @override
   Widget build(BuildContext context) {
     final tasksAsync = ref.watch(myTasksProvider);
+    final currentUserId = ref.watch(authProvider).user?.id;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Calendar')),
@@ -41,13 +44,17 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
           return Column(
             children: [
               Container(
-                margin: const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, Gap.md),
-                padding: const EdgeInsets.symmetric(vertical: Gap.sm),
+                margin: const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, Gap.sm),
+                padding: const EdgeInsets.symmetric(vertical: 2),
                 decoration: BoxDecoration(
                   color: AppColors.surface,
                   borderRadius: BorderRadius.circular(AppRadius.card),
                   border: Border.all(color: AppColors.line),
                 ),
+                // Always the full month grid -- shrunk down across every
+                // dimension (row height, weekday-label row, header) instead
+                // of a week/month toggle, so the task list below always has
+                // more room without an extra tap to get it.
                 child: TableCalendar(
                   firstDay: DateTime.utc(2020, 1, 1),
                   lastDay: DateTime.utc(2035, 12, 31),
@@ -55,23 +62,37 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
                   headerStyle: const HeaderStyle(
                     formatButtonVisible: false,
                     titleCentered: true,
-                    titleTextStyle: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: AppColors.ink),
+                    headerPadding: EdgeInsets.symmetric(vertical: 4),
+                    titleTextStyle: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppColors.ink),
+                    leftChevronPadding: EdgeInsets.zero,
+                    rightChevronPadding: EdgeInsets.zero,
+                    leftChevronIcon: Icon(Icons.chevron_left_rounded, size: 20, color: AppColors.inkMuted),
+                    rightChevronIcon: Icon(Icons.chevron_right_rounded, size: 20, color: AppColors.inkMuted),
                   ),
-                  // A little taller than table_calendar's own 52px default --
-                  // the marker gap added below (markersAnchor) needs somewhere
-                  // to sit that isn't crowding the next row down.
-                  rowHeight: 58,
+                  daysOfWeekHeight: 18,
+                  daysOfWeekStyle: const DaysOfWeekStyle(
+                    weekdayStyle: TextStyle(fontSize: 11, color: AppColors.inkMuted, fontWeight: FontWeight.w600),
+                    weekendStyle: TextStyle(fontSize: 11, color: AppColors.inkMuted, fontWeight: FontWeight.w600),
+                  ),
+                  // Small enough that the fixed 6-row month grid no longer
+                  // eats half the screen, but still tall enough for the
+                  // marker dot below the day number not to feel cramped.
+                  rowHeight: 34,
                   calendarStyle: CalendarStyle(
                     outsideDaysVisible: false,
+                    cellMargin: const EdgeInsets.all(2),
+                    defaultTextStyle: const TextStyle(fontSize: 12.5),
+                    weekendTextStyle: const TextStyle(fontSize: 12.5),
                     todayDecoration: BoxDecoration(
                       color: AppColors.indigoSoft,
                       shape: BoxShape.circle,
                     ),
-                    todayTextStyle: const TextStyle(color: AppColors.indigo, fontWeight: FontWeight.w700),
+                    todayTextStyle: const TextStyle(color: AppColors.indigo, fontWeight: FontWeight.w700, fontSize: 12.5),
                     selectedDecoration: const BoxDecoration(color: AppColors.indigo, shape: BoxShape.circle),
+                    selectedTextStyle: const TextStyle(color: Colors.white, fontSize: 12.5),
                     markerDecoration: const BoxDecoration(color: AppColors.danger, shape: BoxShape.circle),
                     markersMaxCount: 1,
-                    markerSize: 5,
+                    markerSize: 4,
                     // table_calendar's own doc comment: "A value of 0.5 will
                     // center the markers AT the bottom edge of day cell's
                     // decoration" -- i.e. half the dot sits on top of the
@@ -79,9 +100,8 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
                     // even further into the circle, which is exactly the
                     // "dot on the edge of the circle" look this was meant to
                     // fix. A negative anchor pushes the dot's top edge below
-                    // the circle's bottom edge instead of into it -- -1.0
-                    // here means a full marker-height gap between the two.
-                    markersAnchor: -1.0,
+                    // the circle's bottom edge instead of into it.
+                    markersAnchor: -0.6,
                   ),
                   selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
                   eventLoader: (day) => byDay[DateTime(day.year, day.month, day.day)] ?? [],
@@ -123,6 +143,10 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
                             status: t['status'] ?? 'pending',
                             leadingIcon: Icons.task_alt_rounded,
                             subtitle: spaceName != null && spaceName.isNotEmpty ? spaceName : null,
+                            // Same chip set every other task row in the
+                            // app uses (see task_meta_chips.dart) -- due
+                            // date, priority, assigned by/to.
+                            metaRow: taskMetaRow(t, currentUserId: currentUserId),
                             onTap: () => context.push('/home/tasks/${t['_id']}'),
                           );
                         },

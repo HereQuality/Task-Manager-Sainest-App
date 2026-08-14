@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
@@ -25,6 +26,13 @@ const _alertedEscalationIdsKey = 'escalation_alerted_task_ids';
 // uses -- kept identical so the two loops share one "already alerted"
 // record for this category too.
 const _alertedApprovalIdsKey = 'approval_alerted_task_ids';
+// Same key notification_service.dart's snoozeOverdueAlarm writes to --
+// taskId -> epoch-millis "don't re-ring before this time" map, JSON-encoded.
+// See that file's doc comment for why this exists: without it, a snoozed
+// task's id sitting in _alertedOverdueIdsKey would make this loop think it
+// was already handled and never bring the alarm back through this (the
+// reliable) path once the snooze window passed.
+const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
 
 const _watcherChannelId = 'hqepl_watcher';
 
@@ -242,6 +250,15 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
   var urgentCount = 0;
   final currentUserId = await ApiClient.instance.readCurrentUserId();
 
+  final rawSnoozeMap = prefs.getString(_snoozedUntilKey);
+  Map<String, dynamic> snoozedUntil = {};
+  if (rawSnoozeMap != null) {
+    try {
+      snoozedUntil = jsonDecode(rawSnoozeMap) as Map<String, dynamic>;
+    } catch (_) {}
+  }
+  var snoozeMapChanged = false;
+
   for (final t in tasks) {
     final status = (t['status'] ?? '').toString().toLowerCase();
     final isComplete = status.contains('complete') || status.contains('done');
@@ -269,7 +286,31 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
     final id = (t['_id'] ?? t['id'] ?? title).toString();
     final spaceName = (t['spaceName'] ?? '').toString();
 
+    final snoozeUntilMs = snoozedUntil[id] as int?;
+    if (snoozeUntilMs != null && now.millisecondsSinceEpoch < snoozeUntilMs) {
+      // Snoozed and still within the window -- hold off entirely, and
+      // deliberately BEFORE stillOverdueIds.add(id) below: stillOverdueIds
+      // gets merged into alertedIds ("already rang, don't ring again") at
+      // the end of this function, so adding this id to it while still
+      // snoozed would mark the task as alerted before it ever actually
+      // rings again -- silently eating the re-fire the instant the snooze
+      // window passes, since the `!alertedIds.contains(id)` check just
+      // below would then see it as already handled. (This is exactly what
+      // was happening before this fix -- confirmed live: the task showed
+      // "already alerted, skipping re-fire" on the very first tick after
+      // its snooze window ended, meaning it never actually rang again.)
+      print('[WATCHER] taskId=$id snoozed until $snoozeUntilMs, skipping re-fire');
+      continue;
+    }
+    if (snoozeUntilMs != null) {
+      // Snooze window has passed -- clean up so this branch is skipped on
+      // future ticks once the alarm below fires and re-populates alertedIds.
+      snoozedUntil.remove(id);
+      snoozeMapChanged = true;
+    }
+
     stillOverdueIds.add(id);
+
     if (!alertedIds.contains(id)) {
       print('[WATCHER] firing overdue alarm for taskId=$id "$title" due=$due (now=$now)');
       await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
@@ -278,6 +319,10 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
       // tick after the first for the same overdue task, not a failure.
       print('[WATCHER] taskId=$id already alerted this overdue period, skipping re-fire');
     }
+  }
+
+  if (snoozeMapChanged) {
+    await prefs.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
   }
   // Printed every tick (not just on a hit) so a run with zero Urgent tasks,
   // or Urgent tasks that just aren't overdue yet, is distinguishable from
@@ -302,9 +347,19 @@ Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
   if (!(prefs.getBool('notif_master') ?? true)) return;
+  // Same split as notifications_provider.dart's foreground pass -- see
+  // settings_provider.dart's doc comment on taskAssigned/taskUpdates.
+  // Deliberately still calls detectTaskChanges below even when both are
+  // off, rather than returning early -- that call is what advances its
+  // own persisted "already seen" snapshot (task_update_tracker.dart), so
+  // skipping it entirely while muted would let changes pile up and all
+  // flood in at once the moment notifications are turned back on.
+  final assignedAllowed = prefs.getBool('notif_task_assigned') ?? true;
+  final updatesAllowed = prefs.getBool('notif_task_updates') ?? true;
 
   final currentUserId = await ApiClient.instance.readCurrentUserId();
   for (final change in await detectTaskChanges(tasks, currentUserId: currentUserId)) {
+    if (change.isNew ? !assignedAllowed : !updatesAllowed) continue;
     final body = change.activityMessage ??
         (change.isNew ? 'Assigned to you' : 'Task updated') +
             (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
@@ -329,12 +384,19 @@ Future<void> _checkTeamEscalationsOnce() async {
   await prefs.reload();
   final alertedIds = (prefs.getStringList(_alertedEscalationIdsKey) ?? []).toSet();
   final stillEscalatedIds = <String>{};
+  // Its own toggle -- see settings_provider.dart's doc comment on
+  // teamEscalations. stillEscalatedIds is still accumulated and saved
+  // below even while muted (same reasoning as _checkTaskUpdatesOnce
+  // above): only the actual notification post is skipped, so an
+  // escalation that was already showing before the toggle got muted
+  // doesn't re-fire the instant it's turned back on.
+  final escalationsAllowed = prefs.getBool('notif_team_escalations') ?? true;
 
   for (final t in escalations) {
     final id = (t['_id'] ?? '').toString();
     if (id.isEmpty) continue;
     stillEscalatedIds.add(id);
-    if (alertedIds.contains(id)) continue;
+    if (alertedIds.contains(id) || !escalationsAllowed) continue;
     final title = (t['name'] ?? 'Untitled task').toString();
     final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
     final spaceName = (t['spaceName'] ?? '').toString();
@@ -361,12 +423,16 @@ Future<void> _checkPendingApprovalsOnce() async {
   await prefs.reload();
   final alertedIds = (prefs.getStringList(_alertedApprovalIdsKey) ?? []).toSet();
   final stillPendingIds = <String>{};
+  // Its own toggle -- see settings_provider.dart's doc comment on
+  // approvalAlerts. Same "still track seen, just skip the post" reasoning
+  // as _checkTeamEscalationsOnce above.
+  final approvalsAllowed = prefs.getBool('notif_approval_alerts') ?? true;
 
   for (final t in approvals) {
     final id = (t['_id'] ?? '').toString();
     if (id.isEmpty) continue;
     stillPendingIds.add(id);
-    if (alertedIds.contains(id)) continue;
+    if (alertedIds.contains(id) || !approvalsAllowed) continue;
     final title = (t['name'] ?? 'Untitled task').toString();
     final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
     final spaceName = (t['spaceName'] ?? '').toString();

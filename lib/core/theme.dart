@@ -66,6 +66,33 @@ class StatusStyle {
   }
 }
 
+/// Priority → color mapping for the small flag/chip shown on task rows
+/// (Tasks list, etc). Separate from StatusStyle above: that maps a task's
+/// STATUS (including "urgent"/"high" when used as an overdue-style status
+/// keyword elsewhere), this maps the task's PRIORITY field specifically,
+/// with all four levels distinguished rather than the two StatusStyle
+/// bothers with.
+class PriorityStyle {
+  final Color fg;
+  final Color bg;
+  final IconData icon;
+  const PriorityStyle(this.fg, this.bg, this.icon);
+
+  static PriorityStyle of(String priority) {
+    switch (priority.toLowerCase()) {
+      case 'urgent':
+        return const PriorityStyle(AppColors.danger, AppColors.dangerSoft, Icons.flag_rounded);
+      case 'high':
+        return const PriorityStyle(AppColors.warning, AppColors.warningSoft, Icons.flag_rounded);
+      case 'low':
+        return const PriorityStyle(AppColors.inkMuted, AppColors.neutralSoft, Icons.outlined_flag_rounded);
+      case 'normal':
+      default:
+        return const PriorityStyle(AppColors.indigo, AppColors.indigoSoft, Icons.flag_outlined);
+    }
+  }
+}
+
 /// Spacing scale — reach for these instead of arbitrary numbers so rhythm
 /// stays consistent across screens.
 class Gap {

@@ -52,6 +52,7 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
   }
 
   static const _snoozeOptions = [
+    ('1 min', Duration(minutes: 1)),
     ('10 min', Duration(minutes: 10)),
     ('1 hour', Duration(hours: 1)),
     ('2 hours', Duration(hours: 2)),

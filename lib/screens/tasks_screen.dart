@@ -2,11 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../core/theme.dart';
+import '../providers/auth_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/entity_card.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/task_meta_chips.dart';
 
 enum _DueFilter { all, today, upcoming, overdue }
+
+// Separate from _DueFilter above (which narrows by due date within
+// whichever task set is already showing) -- this narrows WHICH tasks are
+// in that set to begin with. myTasksProvider's "/tasks/mine/all" already
+// returns a manager/senior's own tasks mixed together with every
+// subordinate's (see listMyTasksAll in task.controller.js), with no
+// separate "just me" endpoint -- so this is a client-side scope filter on
+// top of that combined list, defaulting to "just me" since that's what
+// someone opening their own Tasks screen expects to see first.
+enum _TaskScope { mine, all }
 
 // Status facet options shown in the Filters sheet -- mirrors the web
 // app's STATUS_GROUPS + OVERDUE_GROUP + DELAYED_GROUP (TaskListView.jsx):
@@ -31,7 +43,14 @@ const _priorityOptions = ['Urgent', 'High', 'Normal', 'Low'];
 // now sitting on the current person's own decision (approve/reject) --
 // more actionable right now than a plain overdue task still waiting on
 // someone else to move it.
-const _statusOrder = ['TO DO', 'IN PROGRESS', 'DELEGATED', 'OVERDUE', 'COMPLETE', 'COMPLETE_LATE'];
+const _statusOrder = [
+  'TO DO',
+  'IN PROGRESS',
+  'DELEGATED',
+  'OVERDUE',
+  'COMPLETE',
+  'COMPLETE_LATE'
+];
 
 // Mirrors TaskListView.jsx#isTaskOverdue: a not-yet-complete task whose
 // due date has passed.
@@ -65,7 +84,8 @@ bool _isDelayed(Map<String, dynamic> t) {
 // without this flag a delegated-and-marked-done task would otherwise just
 // silently sit in whatever its pre-completion group was (TO DO/IN
 // PROGRESS), with nothing in the UI showing it actually needs a decision.
-bool _isPendingApproval(Map<String, dynamic> t) => t['_pendingMyApproval'] == true;
+bool _isPendingApproval(Map<String, dynamic> t) =>
+    t['_pendingMyApproval'] == true;
 
 // Mirrors TaskListView.jsx#effectiveTaskStatus -- what the Status facet
 // actually filters against, rather than the raw task.status. Checked
@@ -91,8 +111,10 @@ String _displayStatus(Map<String, dynamic> t) {
 }
 
 int _compareByDueDate(Map<String, dynamic> a, Map<String, dynamic> b) {
-  final ad = a['dueDate'] != null ? DateTime.tryParse(a['dueDate'].toString()) : null;
-  final bd = b['dueDate'] != null ? DateTime.tryParse(b['dueDate'].toString()) : null;
+  final ad =
+      a['dueDate'] != null ? DateTime.tryParse(a['dueDate'].toString()) : null;
+  final bd =
+      b['dueDate'] != null ? DateTime.tryParse(b['dueDate'].toString()) : null;
   if (ad == null && bd == null) return 0;
   if (ad == null) return 1;
   if (bd == null) return -1;
@@ -108,7 +130,8 @@ String? _refId(dynamic v) {
   return v?.toString();
 }
 
-String? _refName(dynamic v, String nameKey) => v is Map ? v[nameKey]?.toString() : null;
+String? _refName(dynamic v, String nameKey) =>
+    v is Map ? v[nameKey]?.toString() : null;
 
 // One row in the grouped task list -- either a collapsible section header
 // (TO DO/IN PROGRESS/OVERDUE/COMPLETE/COMPLETE (LATE), each with its own
@@ -119,7 +142,9 @@ class _TaskListEntry {
   final int? headerCount;
   final Map<String, dynamic>? task;
 
-  const _TaskListEntry.header(this.headerKey, this.headerLabel, this.headerCount) : task = null;
+  const _TaskListEntry.header(
+      this.headerKey, this.headerLabel, this.headerCount)
+      : task = null;
   const _TaskListEntry.task(this.task)
       : headerKey = null,
         headerLabel = null,
@@ -136,6 +161,7 @@ class TasksScreen extends ConsumerStatefulWidget {
 }
 
 class _TasksScreenState extends ConsumerState<TasksScreen> {
+  _TaskScope _scope = _TaskScope.mine;
   _DueFilter _dueFilter = _DueFilter.all;
   final _searchController = TextEditingController();
   String _query = '';
@@ -157,7 +183,35 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   final Set<String> _collapsedGroups = {};
 
   @override
+  void initState() {
+    super.initState();
+    pendingTaskStatusFilter.addListener(_consumePendingStatusFilter);
+  }
+
+  // Fired when a Dashboard stat card sets pendingTaskStatusFilter -- see
+  // that notifier's own doc comment in tasks_provider.dart. Dashboard's
+  // stats are always scoped to the logged-in person's own tasks (see
+  // dashboardStatsProvider's assigneeIds query param), so this also
+  // forces scope back to "Mine" -- otherwise a stat card tapped while
+  // "All Tasks" was still selected from a previous visit would show
+  // subordinates' tasks mixed in, which wouldn't match the number on the
+  // card that was just tapped.
+  void _consumePendingStatusFilter() {
+    final filter = pendingTaskStatusFilter.value;
+    if (filter == null) return;
+    setState(() {
+      _scope = _TaskScope.mine;
+      _selectedStatuses = filter;
+      _dueFilter = _DueFilter.all;
+      _query = '';
+      _searchController.clear();
+    });
+    pendingTaskStatusFilter.value = null;
+  }
+
+  @override
   void dispose() {
+    pendingTaskStatusFilter.removeListener(_consumePendingStatusFilter);
     _searchController.dispose();
     super.dispose();
   }
@@ -201,7 +255,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     final result = await showModalBottomSheet<_FacetSelection>(
       context: context,
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (_) => _FilterSheet(
         availableTags: availableTags,
         availableAssignees: availableAssignees,
@@ -243,7 +298,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     // does below -- worst case the DELEGATED group is just empty a moment
     // longer, same "don't let this take the rest of the screen down with
     // it" reasoning myTasksProvider's own 403 handling already uses.
-    final pendingApprovals = ref.watch(pendingApprovalsProvider).value ?? const <Map<String, dynamic>>[];
+    final pendingApprovals = ref.watch(pendingApprovalsProvider).value ??
+        const <Map<String, dynamic>>[];
+    final currentUserId = ref.watch(authProvider).user?.id;
 
     return Scaffold(
       appBar: AppBar(title: const Text('My tasks')),
@@ -266,17 +323,39 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             // one's own subordinate) and flags every pending-approval task
             // so _effectiveStatus/_displayStatus can classify it as
             // DELEGATED regardless of which list it came from.
-            final pendingIds = pendingApprovals.map((p) => (p['_id'] ?? '').toString()).toSet();
+            final pendingIds = pendingApprovals
+                .map((p) => (p['_id'] ?? '').toString())
+                .toSet();
             final byId = <String, Map<String, dynamic>>{};
             for (final t in myTasks) {
               final id = (t['_id'] ?? '').toString();
-              byId[id] = pendingIds.contains(id) ? {...t, '_pendingMyApproval': true} : t;
+              byId[id] = pendingIds.contains(id)
+                  ? {...t, '_pendingMyApproval': true}
+                  : t;
             }
             for (final p in pendingApprovals) {
               final id = (p['_id'] ?? '').toString();
               byId.putIfAbsent(id, () => {...p, '_pendingMyApproval': true});
             }
-            final allTasks = byId.values.toList();
+            final combinedTasks = byId.values.toList();
+
+            // "Mine" (the default) keeps only tasks actually assigned to
+            // the logged-in person -- a manager/senior's combinedTasks
+            // above already has every subordinate's tasks mixed in (see
+            // listMyTasksAll in task.controller.js), which is exactly what
+            // "All" surfaces instead. A task awaiting THIS person's own
+            // delegation approval is always kept regardless of scope --
+            // it needs their decision either way, and isn't "assigned to"
+            // them in the first place (it's assigned to whoever they
+            // delegated it to), so the assignee check below would
+            // otherwise hide it from "Mine" entirely.
+            final allTasks = _scope == _TaskScope.all
+                ? combinedTasks
+                : combinedTasks.where((t) {
+                    if (t['_pendingMyApproval'] == true) return true;
+                    final id = _refId(t['assigneeId']);
+                    return currentUserId != null && id == currentUserId;
+                  }).toList();
 
             // Built from every task, not the filtered set below -- the
             // available choices in the filter sheet shouldn't shrink just
@@ -290,7 +369,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             // from what's actually on these tasks, same as Tags, rather
             // than the full team roster/project list.
             final availableTags = <String>{
-              for (final t in allTasks) ...List<String>.from(t['tags'] ?? const []),
+              for (final t in allTasks)
+                ...List<String>.from(t['tags'] ?? const []),
             }.toList()
               ..sort();
 
@@ -311,7 +391,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               if (pId != null && pName != null) availableProjects[pId] = pName;
               final sId = t['spaceId']?.toString();
               final sName = t['spaceName']?.toString();
-              if (sId != null && sName != null && sName.isNotEmpty) availableSpaces[sId] = sName;
+              if (sId != null && sName != null && sName.isNotEmpty)
+                availableSpaces[sId] = sName;
             }
 
             final tasks = allTasks.where((t) {
@@ -330,7 +411,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                   t['priority'],
                   ...List<String>.from(t['tags'] ?? const []),
                 ];
-                final matches = haystack.any((v) => v != null && v.toString().toLowerCase().contains(q));
+                final matches = haystack.any(
+                    (v) => v != null && v.toString().toLowerCase().contains(q));
                 if (!matches) return false;
               }
 
@@ -343,21 +425,29 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               } else if (_dueFilter == _DueFilter.today) {
                 if (t['status'] == 'COMPLETE') return false;
                 final due = t['dueDate'];
-                final d = due != null ? DateTime.tryParse(due.toString()) : null;
+                final d =
+                    due != null ? DateTime.tryParse(due.toString()) : null;
                 if (d == null) return false;
-                if (!(d.year == now.year && d.month == now.month && d.day == now.day)) return false;
+                if (!(d.year == now.year &&
+                    d.month == now.month &&
+                    d.day == now.day)) return false;
               } else if (_dueFilter == _DueFilter.upcoming) {
                 if (t['status'] == 'COMPLETE') return false;
                 final due = t['dueDate'];
-                final d = due != null ? DateTime.tryParse(due.toString()) : null;
+                final d =
+                    due != null ? DateTime.tryParse(due.toString()) : null;
                 if (d == null) return false;
-                if (!(d.isAfter(now) && d.difference(now).inDays <= 7)) return false;
+                if (!(d.isAfter(now) && d.difference(now).inDays <= 7))
+                  return false;
               }
 
-              if (_selectedStatuses.isNotEmpty && !_selectedStatuses.contains(_effectiveStatus(t))) {
+              if (_selectedStatuses.isNotEmpty &&
+                  !_selectedStatuses.contains(_effectiveStatus(t))) {
                 return false;
               }
-              if (_selectedPriorities.isNotEmpty && !_selectedPriorities.contains((t['priority'] ?? '').toString())) {
+              if (_selectedPriorities.isNotEmpty &&
+                  !_selectedPriorities
+                      .contains((t['priority'] ?? '').toString())) {
                 return false;
               }
               if (_selectedTags.isNotEmpty) {
@@ -366,11 +456,13 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               }
               if (_selectedAssigneeIds.isNotEmpty) {
                 final id = _refId(t['assigneeId']);
-                if (id == null || !_selectedAssigneeIds.contains(id)) return false;
+                if (id == null || !_selectedAssigneeIds.contains(id))
+                  return false;
               }
               if (_selectedProjectIds.isNotEmpty) {
                 final id = _refId(t['projectId']);
-                if (id == null || !_selectedProjectIds.contains(id)) return false;
+                if (id == null || !_selectedProjectIds.contains(id))
+                  return false;
               }
               if (_selectedSpaceIds.isNotEmpty) {
                 final id = t['spaceId']?.toString();
@@ -382,10 +474,14 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                 if (t['dueDate'] != null) return false;
               } else if (_dueFrom != null || _dueTo != null) {
                 final dueRaw = t['dueDate'];
-                final due = dueRaw != null ? DateTime.tryParse(dueRaw.toString()) : null;
+                final due = dueRaw != null
+                    ? DateTime.tryParse(dueRaw.toString())
+                    : null;
                 if (due == null) return false;
                 if (_dueFrom != null && due.isBefore(_dueFrom!)) return false;
-                if (_dueTo != null && due.isAfter(_dueTo!.add(const Duration(days: 1)))) return false;
+                if (_dueTo != null &&
+                    due.isAfter(_dueTo!.add(const Duration(days: 1))))
+                  return false;
               }
 
               return true;
@@ -404,16 +500,38 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             // section disappearing.
             final entries = <_TaskListEntry>[];
             for (final key in _statusOrder) {
-              final group = tasks.where((t) => _effectiveStatus(t) == key).toList()..sort(_compareByDueDate);
-              final label = _statusFacetOptions.firstWhere((o) => o.$1 == key, orElse: () => (key, key)).$2;
+              final group = tasks
+                  .where((t) => _effectiveStatus(t) == key)
+                  .toList()
+                ..sort(_compareByDueDate);
+              final label = _statusFacetOptions
+                  .firstWhere((o) => o.$1 == key, orElse: () => (key, key))
+                  .$2;
               entries.add(_TaskListEntry.header(key, label, group.length));
               if (group.isNotEmpty && !_collapsedGroups.contains(key)) {
                 entries.addAll(group.map(_TaskListEntry.task));
               }
             }
 
+            // Passed to TaskDetailScreen (see its own doc comment) so
+            // swiping there follows the exact order rows appear in on
+            // screen -- a task sitting inside a currently-collapsed group
+            // is deliberately left out, same as it's left out of `entries`
+            // above and thus isn't visible to swipe into anyway.
+            final visibleTaskIds = [
+              for (final e in entries)
+                if (!e.isHeader) (e.task!['_id'] ?? '').toString(),
+            ];
+
             return Column(
               children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, 0),
+                  child: _ScopeToggle(
+                    scope: _scope,
+                    onChanged: (s) => setState(() => _scope = s),
+                  ),
+                ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, 0),
                   child: Row(
@@ -424,18 +542,21 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                           textInputAction: TextInputAction.search,
                           decoration: InputDecoration(
                             hintText: 'Search tasks',
-                            prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                            prefixIcon:
+                                const Icon(Icons.search_rounded, size: 20),
                             suffixIcon: _query.isEmpty
                                 ? null
                                 : IconButton(
-                                    icon: const Icon(Icons.close_rounded, size: 18),
+                                    icon: const Icon(Icons.close_rounded,
+                                        size: 18),
                                     onPressed: () {
                                       _searchController.clear();
                                       setState(() => _query = '');
                                     },
                                   ),
                             isDense: true,
-                            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                            contentPadding:
+                                const EdgeInsets.symmetric(vertical: 10),
                           ),
                           onChanged: (v) => setState(() => _query = v),
                         ),
@@ -466,12 +587,18 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                               top: -2,
                               child: Container(
                                 padding: const EdgeInsets.all(3),
-                                decoration: const BoxDecoration(color: AppColors.indigo, shape: BoxShape.circle),
-                                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                                decoration: const BoxDecoration(
+                                    color: AppColors.indigo,
+                                    shape: BoxShape.circle),
+                                constraints: const BoxConstraints(
+                                    minWidth: 16, minHeight: 16),
                                 child: Text(
                                   '$_activeFacetCount',
                                   textAlign: TextAlign.center,
-                                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700),
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700),
                                 ),
                               ),
                             ),
@@ -481,18 +608,36 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.sm),
+                  padding:
+                      const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.sm),
                   child: SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
-                        _FilterChip(label: 'All', count: allTasks.length, selected: _dueFilter == _DueFilter.all, onTap: () => setState(() => _dueFilter = _DueFilter.all)),
+                        _FilterChip(
+                            label: 'All',
+                            count: allTasks.length,
+                            selected: _dueFilter == _DueFilter.all,
+                            onTap: () =>
+                                setState(() => _dueFilter = _DueFilter.all)),
                         const SizedBox(width: Gap.sm),
-                        _FilterChip(label: 'Today', selected: _dueFilter == _DueFilter.today, onTap: () => setState(() => _dueFilter = _DueFilter.today)),
+                        _FilterChip(
+                            label: 'Today',
+                            selected: _dueFilter == _DueFilter.today,
+                            onTap: () =>
+                                setState(() => _dueFilter = _DueFilter.today)),
                         const SizedBox(width: Gap.sm),
-                        _FilterChip(label: 'Upcoming 7 Days', selected: _dueFilter == _DueFilter.upcoming, onTap: () => setState(() => _dueFilter = _DueFilter.upcoming)),
+                        _FilterChip(
+                            label: 'Upcoming 7 Days',
+                            selected: _dueFilter == _DueFilter.upcoming,
+                            onTap: () => setState(
+                                () => _dueFilter = _DueFilter.upcoming)),
                         const SizedBox(width: Gap.sm),
-                        _FilterChip(label: 'Overdue', selected: _dueFilter == _DueFilter.overdue, onTap: () => setState(() => _dueFilter = _DueFilter.overdue)),
+                        _FilterChip(
+                            label: 'Overdue',
+                            selected: _dueFilter == _DueFilter.overdue,
+                            onTap: () => setState(
+                                () => _dueFilter = _DueFilter.overdue)),
                         // Active facets surface here too, each
                         // individually removable with its own X -- same
                         // "chips echo the filter sheet's selections"
@@ -500,47 +645,67 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                         // facet doesn't require reopening the whole sheet.
                         if (_activeFacetCount > 0) ...[
                           const SizedBox(width: Gap.md),
-                          Container(width: 1, height: 20, color: AppColors.line),
+                          Container(
+                              width: 1, height: 20, color: AppColors.line),
                           const SizedBox(width: Gap.md),
                         ],
                         for (final s in _selectedStatuses) ...[
                           _RemovableChip(
-                            label: _statusFacetOptions.firstWhere((o) => o.$1 == s, orElse: () => (s, s)).$2,
-                            onRemoved: () => setState(() => _selectedStatuses = {..._selectedStatuses}..remove(s)),
+                            label: _statusFacetOptions
+                                .firstWhere((o) => o.$1 == s,
+                                    orElse: () => (s, s))
+                                .$2,
+                            onRemoved: () => setState(() => _selectedStatuses =
+                                {..._selectedStatuses}..remove(s)),
                           ),
                           const SizedBox(width: Gap.sm),
                         ],
                         for (final p in _selectedPriorities) ...[
-                          _RemovableChip(label: p, onRemoved: () => setState(() => _selectedPriorities = {..._selectedPriorities}..remove(p))),
+                          _RemovableChip(
+                              label: p,
+                              onRemoved: () => setState(() =>
+                                  _selectedPriorities = {..._selectedPriorities}
+                                    ..remove(p))),
                           const SizedBox(width: Gap.sm),
                         ],
                         for (final id in _selectedAssigneeIds) ...[
                           _RemovableChip(
                             label: availableAssignees[id] ?? 'Assignee',
-                            onRemoved: () => setState(() => _selectedAssigneeIds = {..._selectedAssigneeIds}..remove(id)),
+                            onRemoved: () => setState(() =>
+                                _selectedAssigneeIds = {..._selectedAssigneeIds}
+                                  ..remove(id)),
                           ),
                           const SizedBox(width: Gap.sm),
                         ],
                         for (final id in _selectedProjectIds) ...[
                           _RemovableChip(
                             label: availableProjects[id] ?? 'Project',
-                            onRemoved: () => setState(() => _selectedProjectIds = {..._selectedProjectIds}..remove(id)),
+                            onRemoved: () => setState(() =>
+                                _selectedProjectIds = {..._selectedProjectIds}
+                                  ..remove(id)),
                           ),
                           const SizedBox(width: Gap.sm),
                         ],
                         for (final id in _selectedSpaceIds) ...[
                           _RemovableChip(
                             label: availableSpaces[id] ?? 'Space',
-                            onRemoved: () => setState(() => _selectedSpaceIds = {..._selectedSpaceIds}..remove(id)),
+                            onRemoved: () => setState(() => _selectedSpaceIds =
+                                {..._selectedSpaceIds}..remove(id)),
                           ),
                           const SizedBox(width: Gap.sm),
                         ],
                         if (_dtrOnly) ...[
-                          _RemovableChip(label: 'DTR only', onRemoved: () => setState(() => _dtrOnly = false)),
+                          _RemovableChip(
+                              label: 'DTR only',
+                              onRemoved: () =>
+                                  setState(() => _dtrOnly = false)),
                           const SizedBox(width: Gap.sm),
                         ],
                         if (_noDueDateOnly) ...[
-                          _RemovableChip(label: 'No due date', onRemoved: () => setState(() => _noDueDateOnly = false)),
+                          _RemovableChip(
+                              label: 'No due date',
+                              onRemoved: () =>
+                                  setState(() => _noDueDateOnly = false)),
                           const SizedBox(width: Gap.sm),
                         ] else if (_dueFrom != null || _dueTo != null) ...[
                           _RemovableChip(
@@ -553,11 +718,17 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                           const SizedBox(width: Gap.sm),
                         ],
                         for (final tag in _selectedTags) ...[
-                          _RemovableChip(label: '#$tag', onRemoved: () => setState(() => _selectedTags = {..._selectedTags}..remove(tag))),
+                          _RemovableChip(
+                              label: '#$tag',
+                              onRemoved: () => setState(() => _selectedTags = {
+                                    ..._selectedTags
+                                  }..remove(tag))),
                           const SizedBox(width: Gap.sm),
                         ],
                         if (_activeFacetCount > 0)
-                          TextButton(onPressed: _clearAllFacets, child: const Text('Clear all')),
+                          TextButton(
+                              onPressed: _clearAllFacets,
+                              child: const Text('Clear all')),
                       ],
                     ),
                   ),
@@ -572,17 +743,21 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                               : 'Nothing matches this filter right now.',
                         )
                       : ListView.builder(
-                          padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, Gap.xl),
+                          padding: const EdgeInsets.fromLTRB(
+                              Gap.lg, Gap.sm, Gap.lg, Gap.xl),
                           itemCount: entries.length,
                           itemBuilder: (context, i) {
                             final entry = entries[i];
 
                             if (entry.isHeader) {
-                              final collapsed = _collapsedGroups.contains(entry.headerKey);
+                              final collapsed =
+                                  _collapsedGroups.contains(entry.headerKey);
                               return Padding(
-                                padding: EdgeInsets.only(top: i == 0 ? 0 : Gap.md, bottom: Gap.sm),
+                                padding: EdgeInsets.only(
+                                    top: i == 0 ? 0 : Gap.md, bottom: Gap.sm),
                                 child: InkWell(
-                                  borderRadius: BorderRadius.circular(AppRadius.field),
+                                  borderRadius:
+                                      BorderRadius.circular(AppRadius.field),
                                   onTap: () => setState(() {
                                     if (collapsed) {
                                       _collapsedGroups.remove(entry.headerKey);
@@ -591,13 +766,18 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                                     }
                                   }),
                                   child: Padding(
-                                    padding: const EdgeInsets.symmetric(vertical: Gap.xs),
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: Gap.xs),
                                     child: Row(
                                       children: [
                                         AnimatedRotation(
                                           turns: collapsed ? -0.25 : 0,
-                                          duration: const Duration(milliseconds: 150),
-                                          child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.inkMuted),
+                                          duration:
+                                              const Duration(milliseconds: 150),
+                                          child: const Icon(
+                                              Icons.keyboard_arrow_down_rounded,
+                                              size: 20,
+                                              color: AppColors.inkMuted),
                                         ),
                                         const SizedBox(width: Gap.xs),
                                         // Flexible+ellipsis: the longest header label,
@@ -609,13 +789,22 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                                             entry.headerLabel!,
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
-                                            style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .titleSmall
+                                                ?.copyWith(
+                                                    fontWeight:
+                                                        FontWeight.w700),
                                           ),
                                         ),
                                         const SizedBox(width: Gap.sm),
                                         Text(
                                           '${entry.headerCount}',
-                                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.inkMuted),
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .bodyMedium
+                                              ?.copyWith(
+                                                  color: AppColors.inkMuted),
                                         ),
                                       ],
                                     ),
@@ -625,28 +814,32 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                             }
 
                             final t = entry.task!;
-                            final due = t['dueDate'];
                             final spaceName = t['spaceName']?.toString();
-                            final assigneeName = _refName(t['assigneeId'], 'employeeName');
-                            final dueText = due != null ? 'Due ${due.toString().split('T').first}' : 'No due date';
-                            // This screen now includes subordinates' tasks
-                            // too (not just the viewer's own), so the
-                            // assignee's name is shown alongside the due
-                            // date/space -- otherwise there's no way to
-                            // tell whose task a row belongs to.
-                            final subtitleParts = [
-                              dueText,
-                              if (spaceName != null && spaceName.isNotEmpty) spaceName,
-                              if (assigneeName != null && assigneeName.isNotEmpty) assigneeName,
-                            ];
                             return Padding(
                               padding: const EdgeInsets.only(bottom: Gap.sm),
                               child: EntityCard(
-                                title: t['title'] ?? t['name'] ?? 'Untitled task',
+                                title:
+                                    t['title'] ?? t['name'] ?? 'Untitled task',
                                 status: _displayStatus(t),
                                 leadingIcon: Icons.task_alt_rounded,
-                                subtitle: subtitleParts.join(' · '),
-                                onTap: () => context.push('/home/tasks/${t['_id']}'),
+                                subtitle:
+                                    spaceName != null && spaceName.isNotEmpty
+                                        ? spaceName
+                                        : null,
+                                // Due date, priority, and who assigned the
+                                // task to whom each get their own small
+                                // chip here (shared with every other screen
+                                // that shows a task row -- see
+                                // task_meta_chips.dart) rather than being
+                                // crammed into one ellipsized subtitle
+                                // line, where the assignee name in
+                                // particular used to get silently
+                                // truncated away behind a long space name.
+                                metaRow: taskMetaRow(t,
+                                    currentUserId: currentUserId),
+                                onTap: () => context.push(
+                                    '/home/tasks/${t['_id']}',
+                                    extra: visibleTaskIds),
                               ),
                             );
                           },
@@ -656,7 +849,64 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             );
           },
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => ErrorState(message: '$e', onRetry: () => ref.invalidate(myTasksProvider)),
+          error: (e, _) => ErrorState(
+              message: '$e', onRetry: () => ref.invalidate(myTasksProvider)),
+        ),
+      ),
+    );
+  }
+}
+
+/// "My Tasks" / "All Tasks" segmented switch -- see _TaskScope's own doc
+/// comment for why this is a client-side split on top of one already-
+/// combined list rather than two separate endpoints.
+class _ScopeToggle extends StatelessWidget {
+  final _TaskScope scope;
+  final ValueChanged<_TaskScope> onChanged;
+  const _ScopeToggle({required this.scope, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+          color: AppColors.neutralSoft,
+          borderRadius: BorderRadius.circular(AppRadius.field)),
+      child: Row(
+        children: [
+          Expanded(child: _segment(context, 'My Tasks', _TaskScope.mine)),
+          Expanded(child: _segment(context, 'All Tasks', _TaskScope.all)),
+        ],
+      ),
+    );
+  }
+
+  Widget _segment(BuildContext context, String label, _TaskScope value) {
+    final selected = scope == value;
+    return InkWell(
+      borderRadius: BorderRadius.circular(AppRadius.field - 2),
+      onTap: () => onChanged(value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.surface : Colors.transparent,
+          borderRadius: BorderRadius.circular(AppRadius.field - 2),
+          boxShadow: selected
+              ? [
+                  BoxShadow(
+                      color: Colors.black.withOpacity(0.06),
+                      blurRadius: 4,
+                      offset: const Offset(0, 1))
+                ]
+              : null,
+        ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: selected ? AppColors.indigo : AppColors.inkMuted,
+                fontWeight: FontWeight.w700,
+              ),
         ),
       ),
     );
@@ -797,7 +1047,8 @@ class _FilterSheetState extends State<_FilterSheet> {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        padding:
+            EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
         child: DraggableScrollableSheet(
           initialChildSize: 0.85,
           minChildSize: 0.4,
@@ -809,7 +1060,9 @@ class _FilterSheetState extends State<_FilterSheet> {
                 padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.sm, 0),
                 child: Row(
                   children: [
-                    Expanded(child: Text('Filters', style: Theme.of(context).textTheme.titleLarge)),
+                    Expanded(
+                        child: Text('Filters',
+                            style: Theme.of(context).textTheme.titleLarge)),
                     if (_count > 0)
                       TextButton(
                         onPressed: () => setState(() {
@@ -826,7 +1079,9 @@ class _FilterSheetState extends State<_FilterSheet> {
                         }),
                         child: const Text('Clear all'),
                       ),
-                    IconButton(icon: const Icon(Icons.close_rounded), onPressed: () => Navigator.of(context).pop()),
+                    IconButton(
+                        icon: const Icon(Icons.close_rounded),
+                        onPressed: () => Navigator.of(context).pop()),
                   ],
                 ),
               ),
@@ -847,7 +1102,9 @@ class _FilterSheetState extends State<_FilterSheet> {
                               dense: true,
                               title: Text(label),
                               value: _statuses.contains(key),
-                              onChanged: (v) => setState(() => v == true ? _statuses.add(key) : _statuses.remove(key)),
+                              onChanged: (v) => setState(() => v == true
+                                  ? _statuses.add(key)
+                                  : _statuses.remove(key)),
                             ),
                         ],
                       ),
@@ -861,11 +1118,14 @@ class _FilterSheetState extends State<_FilterSheet> {
                             for (final entry in widget.availableSpaces.entries)
                               CheckboxListTile(
                                 contentPadding: EdgeInsets.zero,
-                                controlAffinity: ListTileControlAffinity.leading,
+                                controlAffinity:
+                                    ListTileControlAffinity.leading,
                                 dense: true,
                                 title: Text(entry.value),
                                 value: _spaceIds.contains(entry.key),
-                                onChanged: (v) => setState(() => v == true ? _spaceIds.add(entry.key) : _spaceIds.remove(entry.key)),
+                                onChanged: (v) => setState(() => v == true
+                                    ? _spaceIds.add(entry.key)
+                                    : _spaceIds.remove(entry.key)),
                               ),
                           ],
                         ),
@@ -883,7 +1143,9 @@ class _FilterSheetState extends State<_FilterSheet> {
                               dense: true,
                               title: Text(p),
                               value: _priorities.contains(p),
-                              onChanged: (v) => setState(() => v == true ? _priorities.add(p) : _priorities.remove(p)),
+                              onChanged: (v) => setState(() => v == true
+                                  ? _priorities.add(p)
+                                  : _priorities.remove(p)),
                             ),
                         ],
                       ),
@@ -894,18 +1156,24 @@ class _FilterSheetState extends State<_FilterSheet> {
                       child: widget.availableAssignees.isEmpty
                           ? Padding(
                               padding: const EdgeInsets.only(bottom: Gap.md),
-                              child: Text('No assignees on your tasks yet.', style: Theme.of(context).textTheme.bodyMedium),
+                              child: Text('No assignees on your tasks yet.',
+                                  style:
+                                      Theme.of(context).textTheme.bodyMedium),
                             )
                           : Column(
                               children: [
-                                for (final entry in widget.availableAssignees.entries)
+                                for (final entry
+                                    in widget.availableAssignees.entries)
                                   CheckboxListTile(
                                     contentPadding: EdgeInsets.zero,
-                                    controlAffinity: ListTileControlAffinity.leading,
+                                    controlAffinity:
+                                        ListTileControlAffinity.leading,
                                     dense: true,
                                     title: Text(entry.value),
                                     value: _assigneeIds.contains(entry.key),
-                                    onChanged: (v) => setState(() => v == true ? _assigneeIds.add(entry.key) : _assigneeIds.remove(entry.key)),
+                                    onChanged: (v) => setState(() => v == true
+                                        ? _assigneeIds.add(entry.key)
+                                        : _assigneeIds.remove(entry.key)),
                                   ),
                               ],
                             ),
@@ -916,18 +1184,24 @@ class _FilterSheetState extends State<_FilterSheet> {
                       child: widget.availableProjects.isEmpty
                           ? Padding(
                               padding: const EdgeInsets.only(bottom: Gap.md),
-                              child: Text('No projects on your tasks yet.', style: Theme.of(context).textTheme.bodyMedium),
+                              child: Text('No projects on your tasks yet.',
+                                  style:
+                                      Theme.of(context).textTheme.bodyMedium),
                             )
                           : Column(
                               children: [
-                                for (final entry in widget.availableProjects.entries)
+                                for (final entry
+                                    in widget.availableProjects.entries)
                                   CheckboxListTile(
                                     contentPadding: EdgeInsets.zero,
-                                    controlAffinity: ListTileControlAffinity.leading,
+                                    controlAffinity:
+                                        ListTileControlAffinity.leading,
                                     dense: true,
                                     title: Text(entry.value),
                                     value: _projectIds.contains(entry.key),
-                                    onChanged: (v) => setState(() => v == true ? _projectIds.add(entry.key) : _projectIds.remove(entry.key)),
+                                    onChanged: (v) => setState(() => v == true
+                                        ? _projectIds.add(entry.key)
+                                        : _projectIds.remove(entry.key)),
                                   ),
                               ],
                             ),
@@ -958,7 +1232,9 @@ class _FilterSheetState extends State<_FilterSheet> {
                                   value: _dueFrom,
                                   enabled: !_noDueDateOnly,
                                   onTap: _pickDueFrom,
-                                  onClear: _dueFrom == null ? null : () => setState(() => _dueFrom = null),
+                                  onClear: _dueFrom == null
+                                      ? null
+                                      : () => setState(() => _dueFrom = null),
                                 ),
                               ),
                               const SizedBox(width: Gap.md),
@@ -968,7 +1244,9 @@ class _FilterSheetState extends State<_FilterSheet> {
                                   value: _dueTo,
                                   enabled: !_noDueDateOnly,
                                   onTap: _pickDueTo,
-                                  onClear: _dueTo == null ? null : () => setState(() => _dueTo = null),
+                                  onClear: _dueTo == null
+                                      ? null
+                                      : () => setState(() => _dueTo = null),
                                 ),
                               ),
                             ],
@@ -1009,7 +1287,8 @@ class _FilterSheetState extends State<_FilterSheet> {
                                   FilterChip(
                                     label: Text(tag),
                                     selected: _tags.contains(tag),
-                                    onSelected: (v) => setState(() => v ? _tags.add(tag) : _tags.remove(tag)),
+                                    onSelected: (v) => setState(() =>
+                                        v ? _tags.add(tag) : _tags.remove(tag)),
                                   ),
                               ],
                             ),
@@ -1021,7 +1300,8 @@ class _FilterSheetState extends State<_FilterSheet> {
               SafeArea(
                 top: false,
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, Gap.sm),
+                  padding:
+                      const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, Gap.sm),
                   child: FilledButton(
                     onPressed: () => Navigator.of(context).pop(
                       _FacetSelection(
@@ -1037,7 +1317,9 @@ class _FilterSheetState extends State<_FilterSheet> {
                         noDueDateOnly: _noDueDateOnly,
                       ),
                     ),
-                    child: Text(_count == 0 ? 'Show all results' : 'Show results ($_count filter${_count == 1 ? '' : 's'})'),
+                    child: Text(_count == 0
+                        ? 'Show all results'
+                        : 'Show results ($_count filter${_count == 1 ? '' : 's'})'),
                   ),
                 ),
               ),
@@ -1050,7 +1332,12 @@ class _FilterSheetState extends State<_FilterSheet> {
 }
 
 class _DateField extends StatelessWidget {
-  const _DateField({required this.label, required this.value, required this.enabled, required this.onTap, this.onClear});
+  const _DateField(
+      {required this.label,
+      required this.value,
+      required this.enabled,
+      required this.onTap,
+      this.onClear});
 
   final String label;
   final DateTime? value;
@@ -1060,7 +1347,9 @@ class _DateField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = value == null ? 'Not set' : '${value!.day}/${value!.month}/${value!.year}';
+    final text = value == null
+        ? 'Not set'
+        : '${value!.day}/${value!.month}/${value!.year}';
     return InkWell(
       onTap: enabled ? onTap : null,
       borderRadius: BorderRadius.circular(AppRadius.field),
@@ -1070,10 +1359,14 @@ class _DateField extends StatelessWidget {
           decoration: InputDecoration(
             labelText: label,
             suffixIcon: onClear != null && enabled
-                ? IconButton(icon: const Icon(Icons.close_rounded, size: 18), onPressed: onClear)
+                ? IconButton(
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                    onPressed: onClear)
                 : const Icon(Icons.calendar_today_outlined, size: 16),
           ),
-          child: Text(text, style: TextStyle(color: value == null ? AppColors.inkMuted : AppColors.ink)),
+          child: Text(text,
+              style: TextStyle(
+                  color: value == null ? AppColors.inkMuted : AppColors.ink)),
         ),
       ),
     );
@@ -1105,7 +1398,11 @@ class _FilterChip extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  const _FilterChip({required this.label, this.count, required this.selected, required this.onTap});
+  const _FilterChip(
+      {required this.label,
+      this.count,
+      required this.selected,
+      required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -1137,7 +1434,8 @@ class _RemovableChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return InputChip(
       label: Text(label),
-      labelStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+      labelStyle:
+          const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
       backgroundColor: AppColors.indigo,
       deleteIconColor: Colors.white,
       side: BorderSide.none,

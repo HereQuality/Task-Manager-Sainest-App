@@ -274,7 +274,12 @@ class _CommentBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final author = comment['authorName']?.toString() ?? 'Someone';
+    // onDelete is only ever wired up for the viewer's own comment (see
+    // where this bubble is built above), so it doubles as "is this mine"
+    // here without needing a separate flag -- "Me" instead of repeating
+    // the logged-in person's own name back at them, same shorthand used
+    // elsewhere in the app.
+    final author = onDelete != null ? 'Me' : (comment['authorName']?.toString() ?? 'Someone');
     final type = comment['type']?.toString();
     final message = comment['message']?.toString() ?? '';
     final createdAt = comment['createdAt']?.toString();

@@ -1,7 +1,7 @@
 name: hqepl_mobile
 description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
 publish_to: 'none'
-version: 1.0.0+25
+version: 1.0.0+37
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

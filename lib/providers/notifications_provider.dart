@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/notification_service.dart';
@@ -12,6 +14,10 @@ const _alertedOverdueIdsKey = 'overdue_alerted_task_ids';
 const _seenNotificationIdsKey = 'seen_notification_ids';
 const _alertedEscalationIdsKey = 'escalation_alerted_task_ids';
 const _alertedApprovalIdsKey = 'approval_alerted_task_ids';
+// Same key notification_service.dart's snoozeOverdueAlarm writes to -- see
+// its doc comment for why a snoozed task must be excluded from the
+// "already alerted" re-fire check below until its snooze window passes.
+const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
 
 /// Which feed items the person has already looked at, by AppNotification.id
 /// -- what the Home bell's badge count subtracts out. This is a real
@@ -103,6 +109,12 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   // path runs first isn't re-announced by the other.
   final currentUserId = ref.watch(authProvider).user?.id;
   for (final change in await detectTaskChanges(tasks, currentUserId: currentUserId)) {
+    // "New task assigned to you" and "an existing task changed" are
+    // separately controllable (see settings_provider.dart's own doc
+    // comment on taskAssigned/taskUpdates) -- a fresh assignment is
+    // usually worth knowing about even for someone who's muted the
+    // noisier "every edit" stream, or vice versa.
+    if (change.isNew ? !settings.taskAssigned : !settings.taskUpdates) continue;
     final body = change.activityMessage ??
         (change.isNew ? 'Assigned to you' : 'Task updated') +
             (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
@@ -119,8 +131,11 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   // logged-in person, not just managers. Independent of the server's own
   // email-escalation flag (oneDayOverdueEscalatedAt) -- this app keeps
   // its own "already alerted" record instead, same pattern as
-  // _alertedOverdueIdsKey above.
-  if (settings.taskDueReminders) {
+  // _alertedOverdueIdsKey above. Its own toggle (teamEscalations) rather
+  // than taskDueReminders -- this is about a REPORT's task, not the
+  // viewer's own due dates, so it belongs with the other "someone else's
+  // activity" toggles below, not the personal due-date reminder one.
+  if (settings.teamEscalations) {
     final escalations = await fetchTeamOverdueEscalations();
     final alertedEscalationIds = await _loadAlertedEscalationIds();
     final stillEscalatedIds = <String>{};
@@ -143,10 +158,9 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
 
   // Delegator-side alert: a delegate asked to mark a delegated task
   // complete, and it's waiting on THIS person's approval -- see
-  // fetchPendingApprovals. Not gated on taskDueReminders (this isn't a
-  // due-date concept at all, it's an approval workflow), only on the
-  // master toggle already checked above.
-  {
+  // fetchPendingApprovals. Its own toggle (approvalAlerts) -- this isn't
+  // a due-date concept at all, it's an approval workflow.
+  if (settings.approvalAlerts) {
     final approvals = await fetchPendingApprovals();
     final alertedApprovalIds = await _loadAlertedApprovalIds();
     final stillPendingIds = <String>{};
@@ -170,6 +184,22 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   if (settings.taskDueReminders) {
     final alertedIds = await _loadAlertedIds();
     final stillOverdueIds = <String>{};
+    // Separate from stillOverdueIds (which drives the feed's "Overdue: X"
+    // items and should keep listing a snoozed task) -- this is what
+    // actually gets persisted as "already alerted", so a still-snoozed
+    // task must be excluded from it. See the doc comment at its one
+    // populating site below.
+    final stillAlertedIds = <String>{};
+
+    final prefsForSnooze = await SharedPreferences.getInstance();
+    final rawSnoozeMap = prefsForSnooze.getString(_snoozedUntilKey);
+    Map<String, dynamic> snoozedUntil = {};
+    if (rawSnoozeMap != null) {
+      try {
+        snoozedUntil = jsonDecode(rawSnoozeMap) as Map<String, dynamic>;
+      } catch (_) {}
+    }
+    var snoozeMapChanged = false;
 
     for (final t in tasks) {
       final status = (t['status'] ?? '').toString().toLowerCase();
@@ -215,12 +245,35 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
           spaceName: spaceName.isNotEmpty ? spaceName : null,
         ));
 
+        // Snoozed and still within the window -- see
+        // notification_service.dart's snoozeOverdueAlarm doc comment.
+        // `alertedIds` was deliberately cleared for this id on snooze, so
+        // without this check the block below would treat it as a fresh
+        // catch-up case and re-ring immediately instead of waiting out the
+        // snooze duration.
+        final snoozeUntilMs = snoozedUntil[id] as int?;
+        final stillSnoozed = snoozeUntilMs != null && now.millisecondsSinceEpoch < snoozeUntilMs;
+        if (snoozeUntilMs != null && !stillSnoozed) {
+          snoozedUntil.remove(id);
+          snoozeMapChanged = true;
+        }
+
+        // Deliberately NOT added to stillAlertedIds while still snoozed --
+        // stillAlertedIds is what gets persisted as the "already alerted"
+        // record below, and marking a still-snoozed task as alerted before
+        // it actually rings again would make the `!alertedIds.contains(id)`
+        // check just below silently skip it forever once the snooze window
+        // passes (confirmed live: this exact bug was why a snoozed alarm
+        // never came back). stillOverdueIds above still gets it, since the
+        // feed item itself should keep showing regardless of snooze state.
+        if (!stillSnoozed) stillAlertedIds.add(id);
+
         // Catch-up path: this task became overdue without the alarm ever
         // having been armed for it (e.g. it was created/assigned from
         // the web app, so this device never had a chance to schedule
         // it ahead of time via the `else` branch below). Fires once;
         // `alertedIds` stops it from re-ringing on every feed refresh.
-        if (isUrgent && isMine && !alertedIds.contains(id)) {
+        if (isUrgent && isMine && !stillSnoozed && !alertedIds.contains(id)) {
           await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
           // Posting the notification above only gets Android to launch
           // the full-screen intent when the app is backgrounded/closed
@@ -274,7 +327,10 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       }
     }
 
-    await _saveAlertedIds(stillOverdueIds);
+    await _saveAlertedIds(stillAlertedIds);
+    if (snoozeMapChanged) {
+      await prefsForSnooze.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
+    }
   }
 
   if (settings.ticketUpdates) {

@@ -244,10 +244,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
             ),
           ),
           const SizedBox(height: Gap.xl),
-          _SectionLabel('What you hear about'),
+          _SectionLabel('Task activity'),
           Card(
             child: Column(
               children: [
+                _SettingTile(
+                  title: 'New task assigned to you',
+                  subtitle: 'The moment someone creates or assigns a task to you',
+                  value: settings.taskAssigned,
+                  enabled: settings.masterEnabled,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(taskAssigned: v)),
+                ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _SettingTile(
+                  title: 'Task updates',
+                  subtitle: 'An edit to a task already assigned to you',
+                  value: settings.taskUpdates,
+                  enabled: settings.masterEnabled,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(taskUpdates: v)),
+                ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
                 _SettingTile(
                   title: 'Task due reminders',
                   subtitle: 'A reminder before a task assigned to you is due',
@@ -256,6 +272,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
                   onChanged: (v) => notifier.update((s) => s.copyWith(taskDueReminders: v)),
                 ),
                 const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _SettingTile(
+                  title: 'Approval needed',
+                  subtitle: 'A task you delegated was marked complete and needs your decision',
+                  value: settings.approvalAlerts,
+                  enabled: settings.masterEnabled,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(approvalAlerts: v)),
+                ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _SettingTile(
+                  title: 'Team overdue alerts',
+                  subtitle: "A direct report's task is overdue by a day or more (managers only)",
+                  value: settings.teamEscalations,
+                  enabled: settings.masterEnabled,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(teamEscalations: v)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: Gap.xl),
+          _SectionLabel('What you hear about'),
+          Card(
+            child: Column(
+              children: [
                 _SettingTile(
                   title: 'Ticket updates',
                   subtitle: 'When a ticket you raised or work on changes status',
