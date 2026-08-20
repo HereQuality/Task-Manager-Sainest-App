@@ -8,6 +8,7 @@ import 'core/theme.dart';
 import 'core/notification_service.dart';
 import 'core/background_watcher_service.dart';
 import 'core/pending_attachment_service.dart';
+import 'core/socket_service.dart';
 import 'providers/auth_provider.dart';
 
 Future<void> main() async {
@@ -172,6 +173,11 @@ class _HqeplAppState extends ConsumerState<HqeplApp> with WidgetsBindingObserver
     if (state != AppLifecycleState.resumed) return;
     if (ref.read(authProvider).status == AuthStatus.authenticated) {
       startBackgroundWatcher();
+      // Cheap no-op if already connected (see SocketService.connect's own
+      // doc comment) -- covers the case where the socket dropped while the
+      // app was backgrounded and needs a fresh handshake now that a resume
+      // proves there's network again.
+      unawaited(SocketService.instance.connect());
       // Finishes any task attachment whose picker was still open when the
       // app went to the background -- this is the ONLY place the upload is
       // actually kicked off, whether or not Android tore the Activity down
@@ -202,6 +208,12 @@ class _HqeplAppState extends ConsumerState<HqeplApp> with WidgetsBindingObserver
       if (previous?.status != AuthStatus.authenticated &&
           next.status == AuthStatus.authenticated) {
         unawaited(PendingAttachmentService.instance.recoverPendingUpload());
+        unawaited(SocketService.instance.connect());
+      } else if (previous?.status == AuthStatus.authenticated &&
+          next.status != AuthStatus.authenticated) {
+        // Logout (or a 401 clearing the session) -- see disconnect's own
+        // doc comment on why a stale-token socket can't just be left open.
+        SocketService.instance.disconnect();
       }
     });
 

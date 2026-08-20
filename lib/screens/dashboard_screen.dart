@@ -88,62 +88,88 @@ class DashboardScreen extends ConsumerWidget {
                 final inProgress = (stats['inProgress'] as num?) ?? 0;
                 final delayed = (stats['delayed'] as num?) ?? 0;
                 final atsScore = (stats['atsScore'] as num?)?.toDouble() ?? 0;
+                // Judged tasks only -- completed (on-time or delayed) or
+                // overdue -- same reasoning as the web Dashboard's own fix:
+                // In Progress tasks not yet due haven't been judged either
+                // way, so dividing by totalTask (which still includes them)
+                // understated this percentage for no reason tied to actual
+                // performance.
+                final judgedTotal = onTimeCompletion + delayed + overdue;
                 final otcPct =
-                    totalTask > 0 ? (onTimeCompletion / totalTask) * 100 : 0;
+                    judgedTotal > 0 ? (onTimeCompletion / judgedTotal) * 100 : 0;
 
-                return GridView.count(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  crossAxisCount: 2,
-                  mainAxisSpacing: Gap.md,
-                  crossAxisSpacing: Gap.md,
-                  childAspectRatio: 1.5,
+                return Column(
                   children: [
-                    _StatCard(
-                      label: 'Total tasks',
-                      value: '${totalTask.toInt()}',
-                      color: AppColors.indigo,
-                      icon: Icons.stacked_bar_chart_rounded,
-                      onTap: () => _openTasksFiltered(const {}),
+                    // ATS/OTC are the two headline performance scores, not
+                    // just another count like the cards below -- a distinct
+                    // "hero" ring treatment up top is what makes them read
+                    // as the numbers to check first, before the raw
+                    // task-count breakdown underneath.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ScoreRingCard(
+                            label: 'ATS Score',
+                            pct: atsScore.toDouble(),
+                            color: AppColors.indigo,
+                          ),
+                        ),
+                        const SizedBox(width: Gap.md),
+                        Expanded(
+                          child: _ScoreRingCard(
+                            label: 'On-Time Completion',
+                            pct: otcPct.toDouble(),
+                            color: AppColors.success,
+                          ),
+                        ),
+                      ],
                     ),
-                    _StatCard(
-                      label: 'On time completion',
-                      value: '${onTimeCompletion.toInt()}',
-                      color: AppColors.success,
-                      icon: Icons.check_circle_outline_rounded,
-                      onTap: () => _openTasksFiltered(const {'COMPLETE'}),
+                    const SizedBox(height: Gap.md),
+                    GridView.count(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      crossAxisCount: 2,
+                      mainAxisSpacing: Gap.md,
+                      crossAxisSpacing: Gap.md,
+                      childAspectRatio: 1.5,
+                      children: [
+                        _StatCard(
+                          label: 'Total tasks',
+                          value: '${totalTask.toInt()}',
+                          color: AppColors.indigo,
+                          icon: Icons.stacked_bar_chart_rounded,
+                          onTap: () => _openTasksFiltered(const {}),
+                        ),
+                        _StatCard(
+                          label: 'On time completion',
+                          value: '${onTimeCompletion.toInt()}',
+                          color: AppColors.success,
+                          icon: Icons.check_circle_outline_rounded,
+                          onTap: () => _openTasksFiltered(const {'COMPLETE'}),
+                        ),
+                        _StatCard(
+                          label: 'Overdue',
+                          value: '$overdue',
+                          color: AppColors.danger,
+                          icon: Icons.error_outline_rounded,
+                          onTap: () => _openTasksFiltered(const {'OVERDUE'}),
+                        ),
+                        _StatCard(
+                          label: 'In progress',
+                          value: '$inProgress',
+                          color: AppColors.warning,
+                          icon: Icons.timelapse_rounded,
+                          onTap: () => _openTasksFiltered(const {'IN PROGRESS'}),
+                        ),
+                        _StatCard(
+                          label: 'Delayed',
+                          value: '$delayed',
+                          color: AppColors.warning,
+                          icon: Icons.hourglass_bottom_rounded,
+                          onTap: () => _openTasksFiltered(const {'COMPLETE_LATE'}),
+                        ),
+                      ],
                     ),
-                    _StatCard(
-                      label: 'Overdue',
-                      value: '$overdue',
-                      color: AppColors.danger,
-                      icon: Icons.error_outline_rounded,
-                      onTap: () => _openTasksFiltered(const {'OVERDUE'}),
-                    ),
-                    _StatCard(
-                      label: 'In progress',
-                      value: '$inProgress',
-                      color: AppColors.warning,
-                      icon: Icons.timelapse_rounded,
-                      onTap: () => _openTasksFiltered(const {'IN PROGRESS'}),
-                    ),
-                    _StatCard(
-                      label: 'Delayed',
-                      value: '$delayed',
-                      color: AppColors.warning,
-                      icon: Icons.hourglass_bottom_rounded,
-                      onTap: () => _openTasksFiltered(const {'COMPLETE_LATE'}),
-                    ),
-                    _StatCard(
-                        label: 'ATS Score',
-                        value: '${atsScore.toStringAsFixed(1)}%',
-                        color: AppColors.indigo,
-                        icon: Icons.speed_rounded),
-                    _StatCard(
-                        label: 'OTC',
-                        value: '${otcPct.toStringAsFixed(1)}%',
-                        color: AppColors.success,
-                        icon: Icons.check_circle_outline_rounded),
                   ],
                 );
               },
@@ -223,6 +249,73 @@ class DashboardScreen extends ConsumerWidget {
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (e, _) => Text('Could not load tasks.',
                   style: Theme.of(context).textTheme.bodyMedium),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Headline performance card for ATS/OTC -- a circular progress ring with
+/// the percentage inside, instead of the plain icon+value+label tile the
+/// other stats below use. Deliberately a different shape (not just a
+/// different color) so these two read as "the numbers that matter most"
+/// at a glance, ahead of the raw task-count breakdown underneath.
+class _ScoreRingCard extends StatelessWidget {
+  final String label;
+  final double pct;
+  final Color color;
+  const _ScoreRingCard({required this.label, required this.pct, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final clamped = pct.clamp(0, 100) / 100;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: Gap.lg, horizontal: Gap.md),
+        child: Column(
+          children: [
+            SizedBox(
+              width: 76,
+              height: 76,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox(
+                    width: 76,
+                    height: 76,
+                    child: CircularProgressIndicator(
+                      value: 1,
+                      strokeWidth: 7,
+                      color: color.withValues(alpha: 0.12),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 76,
+                    height: 76,
+                    child: CircularProgressIndicator(
+                      value: clamped.toDouble(),
+                      strokeWidth: 7,
+                      color: color,
+                      strokeCap: StrokeCap.round,
+                    ),
+                  ),
+                  Text(
+                    '${pct.toStringAsFixed(0)}%',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(color: color, fontWeight: FontWeight.w800),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: Gap.sm),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
             ),
           ],
         ),

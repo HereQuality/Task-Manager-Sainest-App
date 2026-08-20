@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api_client.dart';
 import '../core/background_watcher_service.dart';
+import '../core/notification_service.dart';
 import '../models/user.dart';
 
 enum AuthStatus { unknown, authenticated, unauthenticated }
@@ -50,10 +51,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // need to sign back in once, same as if the token had genuinely
       // expired.
       state = state.copyWith(status: AuthStatus.unauthenticated);
+      pendingAlarmNotifier.value = null;
       return;
     }
     if (token == null) {
       state = state.copyWith(status: AuthStatus.unauthenticated);
+      pendingAlarmNotifier.value = null;
       return;
     }
     // "Remember me" was unchecked at login -- the token still had to be
@@ -65,6 +68,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       await _dio.clearToken();
       await _dio.clearRememberMe();
       state = state.copyWith(status: AuthStatus.unauthenticated);
+      pendingAlarmNotifier.value = null;
       return;
     }
     try {
@@ -95,6 +99,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
       if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
         await _dio.clearToken();
         await _dio.clearRememberMe();
+        // A genuinely dead session -- see logout()'s own doc comment on
+        // why pendingAlarmNotifier must never survive past this point.
+        pendingAlarmNotifier.value = null;
       }
       state = state.copyWith(status: AuthStatus.unauthenticated);
     } catch (_) {
@@ -139,7 +146,22 @@ class AuthNotifier extends StateNotifier<AuthState> {
       await startBackgroundWatcher();
       return true;
     } on DioException catch (e) {
-      final msg = e.response?.data?['message'] ?? 'Login failed. Check your credentials.';
+      // e.response is only set once the server actually replied -- a
+      // connection timeout, no internet, DNS failure, or TLS hiccup never
+      // gets that far, so e.response is null and e.response?.data?['message']
+      // would silently fall through to the SAME generic fallback text a
+      // genuinely wrong password gets. That's actively misleading: it tells
+      // someone to "check your credentials" when the real problem is their
+      // phone's own network, sending them off to retype a password that
+      // was never actually wrong. Distinguishing the two here means the
+      // message people see actually points at what to fix.
+      final msg = e.response?.data?['message'] ??
+          (e.type == DioExceptionType.connectionError ||
+                  e.type == DioExceptionType.connectionTimeout ||
+                  e.type == DioExceptionType.receiveTimeout ||
+                  e.type == DioExceptionType.sendTimeout
+              ? 'Could not reach the server. Check your internet connection and try again.'
+              : 'Login failed. Check your credentials.');
       state = state.copyWith(status: AuthStatus.unauthenticated, error: msg);
       return false;
     }
@@ -155,6 +177,17 @@ class AuthNotifier extends StateNotifier<AuthState> {
     await _dio.clearRememberMe();
     await _dio.clearCurrentUserId();
     await stopBackgroundWatcher();
+    // pendingAlarmNotifier is a single global flag (see router.dart's
+    // redirect, which force-navigates to the Alarm screen the instant
+    // it's non-null) -- if an alarm ever fired while the person wasn't on
+    // a screen that could consume/clear it (e.g. they were already on
+    // the login screen, or backgrounded), it stays set with nothing to
+    // clear it. Left alone, the moment ANYONE next logs into this device
+    // -- including a different account -- the router replays that stale
+    // alarm immediately, showing an old/already-handled reminder as if
+    // it just rang. Logging out is the one guaranteed checkpoint to wipe
+    // it, so no login can ever inherit another session's leftover alarm.
+    pendingAlarmNotifier.value = null;
     state = const AuthState(status: AuthStatus.unauthenticated);
   }
 }

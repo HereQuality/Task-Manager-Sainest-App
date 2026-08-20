@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/notification_service.dart';
 import '../core/theme.dart';
+import '../providers/email_preferences_provider.dart';
 import '../providers/settings_provider.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -249,10 +250,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
             child: Column(
               children: [
                 _SettingTile(
+                  title: 'My Task notifications',
+                  subtitle: 'Master switch for the two push alerts below (new assignments + updates on your own tasks)',
+                  value: settings.myTaskNotifications,
+                  enabled: settings.masterEnabled,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(myTaskNotifications: v)),
+                ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _SettingTile(
                   title: 'New task assigned to you',
                   subtitle: 'The moment someone creates or assigns a task to you',
                   value: settings.taskAssigned,
-                  enabled: settings.masterEnabled,
+                  enabled: settings.masterEnabled && settings.myTaskNotifications,
                   onChanged: (v) => notifier.update((s) => s.copyWith(taskAssigned: v)),
                 ),
                 const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
@@ -260,7 +269,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
                   title: 'Task updates',
                   subtitle: 'An edit to a task already assigned to you',
                   value: settings.taskUpdates,
-                  enabled: settings.masterEnabled,
+                  enabled: settings.masterEnabled && settings.myTaskNotifications,
                   onChanged: (v) => notifier.update((s) => s.copyWith(taskUpdates: v)),
                 ),
                 const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
@@ -291,6 +300,37 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
             ),
           ),
           const SizedBox(height: Gap.xl),
+          _SectionLabel('Team activity'),
+          Card(
+            child: Column(
+              children: [
+                _SettingTile(
+                  title: 'Team task notifications',
+                  subtitle: 'Master switch for the two push alerts below, about your direct reports\' tasks (separate from Team overdue alerts above)',
+                  value: settings.teamTaskNotifications,
+                  enabled: settings.masterEnabled,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(teamTaskNotifications: v)),
+                ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _SettingTile(
+                  title: 'New task for a team member',
+                  subtitle: 'The moment a task is created or assigned to one of your reports',
+                  value: settings.teamTaskAssigned,
+                  enabled: settings.masterEnabled && settings.teamTaskNotifications,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(teamTaskAssigned: v)),
+                ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _SettingTile(
+                  title: 'Team task updates',
+                  subtitle: 'An edit to a task already assigned to one of your reports',
+                  value: settings.teamTaskUpdates,
+                  enabled: settings.masterEnabled && settings.teamTaskNotifications,
+                  onChanged: (v) => notifier.update((s) => s.copyWith(teamTaskUpdates: v)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: Gap.xl),
           _SectionLabel('What you hear about'),
           Card(
             child: Column(
@@ -305,7 +345,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
                 const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
                 _SettingTile(
                   title: 'Daily digest',
-                  subtitle: "A morning summary of today's tasks",
+                  subtitle: "A morning summary of today's tasks, and an end-of-day wrap-up -- sent at your company's office start/end times",
                   value: settings.dailyDigest,
                   enabled: settings.masterEnabled,
                   onChanged: (v) => notifier.update((s) => s.copyWith(dailyDigest: v)),
@@ -313,6 +353,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
               ],
             ),
           ),
+          const SizedBox(height: Gap.xl),
+          _SectionLabel('Email notifications'),
+          const _EmailNotificationsCard(),
           const SizedBox(height: Gap.xl),
           _SectionLabel('Timing'),
           Card(
@@ -353,6 +396,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Per-category EMAIL toggles -- server-synced (see
+/// email_preferences_provider.dart), unlike every other card on this
+/// screen which is an on-device push/local-notification setting. Same 7
+/// categories, same labels, as the web app's Settings page.
+class _EmailNotificationsCard extends ConsumerWidget {
+  const _EmailNotificationsCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final prefsAsync = ref.watch(emailPreferencesProvider);
+    final notifier = ref.read(emailPreferencesProvider.notifier);
+
+    return Card(
+      child: prefsAsync.when(
+        data: (prefs) => Column(
+          children: [
+            for (var i = 0; i < emailCategories.length; i++) ...[
+              if (i > 0) const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+              _SettingTile(
+                title: emailCategories[i].label,
+                subtitle: emailCategories[i].desc,
+                value: prefs[emailCategories[i].key] ?? true,
+                onChanged: (v) => notifier.setCategory(emailCategories[i].key, v),
+              ),
+            ],
+          ],
+        ),
+        loading: () => const Padding(
+          padding: EdgeInsets.symmetric(vertical: Gap.xl),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+        error: (e, _) => Padding(
+          padding: const EdgeInsets.all(Gap.lg),
+          child: Text(
+            "Couldn't load your email preferences.",
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+        ),
       ),
     );
   }

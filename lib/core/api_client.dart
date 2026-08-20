@@ -26,10 +26,30 @@ class ApiClient {
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) async {
-          final token = await _storage.read(key: _tokenKey);
-          if (token != null) {
-            options.headers['Authorization'] = 'Bearer $token';
-          }
+          // Best-effort: flutter_secure_storage's Android KeyStore-backed
+          // key can go permanently unreadable (AEADBadTagException/
+          // "Signature/MAC verification failed") after certain OS-level
+          // events -- confirmed on a real device via logcat, most likely
+          // from switching between differently-signed builds (debug vs.
+          // release) installed over each other on the same device, which
+          // can leave the app's encrypted store referencing a KeyStore key
+          // that no longer decrypts it. Without this try/catch, EVERY
+          // request (including login itself, which needs no token at all)
+          // failed with a generic error that looked exactly like a
+          // rejected password -- read() throwing here doesn't get any
+          // chance to become the clearer message auth_provider.dart's own
+          // login() catch block builds, since it never reaches the network
+          // at all. resetOnError below is the real fix (wipes and
+          // recreates the corrupted store instead of leaving it broken
+          // forever); this is just insurance so a request in flight before
+          // that reset takes effect still goes out as an unauthenticated
+          // one instead of failing outright.
+          try {
+            final token = await _storage.read(key: _tokenKey);
+            if (token != null) {
+              options.headers['Authorization'] = 'Bearer $token';
+            }
+          } catch (_) {}
           handler.next(options);
         },
         onError: (error, handler) async {
@@ -54,8 +74,18 @@ class ApiClient {
   // silently come back null, which looked exactly like "remember me"
   // not working: the token was written fine, it just couldn't be read
   // back a moment later.
+  // resetOnError: true is the plugin's own documented recovery for exactly
+  // the AEADBadTagException/"Signature/MAC verification failed" crash
+  // confirmed via logcat on a real device -- when the KeyStore-backed key
+  // can no longer decrypt the existing encrypted store (seen after
+  // installing differently-signed builds, debug then release, over each
+  // other on the same device), a bare read/write throws forever with no
+  // way to recover short of clearing app data by hand. This makes the
+  // plugin wipe and recreate its own corrupted store the moment it hits
+  // that error, so the person just gets signed out and can log back in,
+  // rather than every request silently failing indefinitely.
   final _storage = const FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(encryptedSharedPreferences: true, resetOnError: true),
   );
   static const _tokenKey = 'access_token';
   static const _rememberMeKey = 'remember_me';

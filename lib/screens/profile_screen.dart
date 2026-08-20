@@ -85,6 +85,18 @@ class ProfileScreen extends ConsumerWidget {
                   label: 'Support tickets',
                   onTap: () => context.push('/home/tickets'),
                 ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _MenuTile(
+                  icon: Icons.fact_check_outlined,
+                  label: 'Pending Approvals',
+                  onTap: () => context.push('/home/pending-approvals'),
+                ),
+                const Divider(height: 1, indent: Gap.lg, endIndent: Gap.lg),
+                _MenuTile(
+                  icon: Icons.hourglass_empty_rounded,
+                  label: 'Awaiting Approval',
+                  onTap: () => context.push('/home/awaiting-approval'),
+                ),
               ],
             ),
           ),

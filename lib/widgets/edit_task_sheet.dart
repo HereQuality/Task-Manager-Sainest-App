@@ -1,78 +1,53 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
-import '../providers/spaces_provider.dart';
 import '../providers/tasks_provider.dart';
 
 const _priorities = ['Urgent', 'High', 'Normal', 'Low'];
 
-class _AddTaskResult {
-  final String name;
-  final String spaceId;
-  final DateTime? startDate;
-  final DateTime? dueDate;
-  final DateTime? reminderAt;
-  final String? priority;
-  final String? assigneeId;
-  _AddTaskResult({
-    required this.name,
-    required this.spaceId,
-    this.startDate,
-    this.dueDate,
-    this.reminderAt,
-    this.priority,
-    this.assigneeId,
-  });
-}
-
-/// The "+" slot in the bottom nav (see home_shell.dart) opens this instead
-/// of switching tabs -- same bottom-sheet pattern as "New support ticket"
-/// on the Tickets screen, just for creating a task: Space is scoped to
-/// the Spaces this account is a member of (or every Space for a
-/// SuperAdmin -- see listMySpaces in space.controller.js, spacesProvider
-/// just calls GET /spaces as-is), while Assign To deliberately lists
-/// every active employee in the company (see assignableEmployeesProvider)
-/// since a task can be handed to anyone, not just people in that Space.
-Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
-  final result = await showModalBottomSheet<_AddTaskResult>(
+/// Task Detail's "Edit" pencil -- lets the assignee/creator change a
+/// task's own details (name, assignee, priority, start/due date) from the
+/// phone, the same fields the web app's TaskDetailModal edits. There's no
+/// separate mobile-side permission check here on purpose: the server is
+/// the single source of truth for who can still edit a task and until
+/// when (SuperAdmin/Teams-Full-Access always, everyone else only within 5
+/// minutes of the task being assigned -- see isPastEditGracePeriod/
+/// canBypassTaskLocks in task.controller.js), so this sheet just submits
+/// and surfaces whatever the server decides, identically to the website.
+Future<void> showEditTaskSheet(
+  BuildContext context,
+  WidgetRef ref,
+  Map<String, dynamic> task,
+) async {
+  final saved = await showModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     backgroundColor: AppColors.surface,
     shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-    builder: (ctx) => const _AddTaskSheetContent(),
+    builder: (ctx) => _EditTaskSheetContent(task: task),
   );
 
-  if (result == null) return;
-
-  await createTaskInSpace(
-    result.spaceId,
-    name: result.name,
-    assigneeId: result.assigneeId,
-    startDate: result.startDate,
-    dueDate: result.dueDate,
-    reminderAt: result.reminderAt,
-    priority: result.priority,
-  );
-  ref.invalidate(myTasksProvider);
-  ref.invalidate(dashboardStatsProvider);
-  if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Task added')));
+  if (saved == true) {
+    ref.invalidate(taskDetailProvider(task['_id'].toString()));
+    ref.invalidate(myTasksProvider);
+    ref.invalidate(dashboardStatsProvider);
   }
 }
 
-class _AddTaskSheetContent extends ConsumerStatefulWidget {
-  const _AddTaskSheetContent();
+class _EditTaskSheetContent extends ConsumerStatefulWidget {
+  final Map<String, dynamic> task;
+  const _EditTaskSheetContent({required this.task});
 
   @override
-  ConsumerState<_AddTaskSheetContent> createState() => _AddTaskSheetContentState();
+  ConsumerState<_EditTaskSheetContent> createState() => _EditTaskSheetContentState();
 }
 
-class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
-  final _nameCtrl = TextEditingController();
-  String? _spaceId;
+class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
+  late final TextEditingController _nameCtrl;
   String? _assigneeId;
   String? _priority;
   DateTime? _startDate;
@@ -80,6 +55,33 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   TimeOfDay? _dueTime;
   DateTime? _reminderDate;
   TimeOfDay? _reminderTime;
+  bool _saving = false;
+  String? _error;
+
+  DateTime? _parseDate(dynamic value) {
+    if (value == null) return null;
+    return DateTime.tryParse(value.toString())?.toLocal();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final t = widget.task;
+    _nameCtrl = TextEditingController(text: t['name']?.toString() ?? '');
+    final assignee = t['assigneeId'];
+    _assigneeId = (assignee is Map ? assignee['_id'] : assignee)?.toString();
+    _priority = t['priority']?.toString();
+    _startDate = _parseDate(t['startDate']);
+    _dueDate = _parseDate(t['dueDate']);
+    if (_dueDate != null && (_dueDate!.hour != 0 || _dueDate!.minute != 0)) {
+      _dueTime = TimeOfDay(hour: _dueDate!.hour, minute: _dueDate!.minute);
+    }
+    final reminder = _parseDate(t['reminderAt']);
+    if (reminder != null) {
+      _reminderDate = DateTime(reminder.year, reminder.month, reminder.day);
+      _reminderTime = TimeOfDay(hour: reminder.hour, minute: reminder.minute);
+    }
+  }
 
   @override
   void dispose() {
@@ -87,18 +89,23 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
     super.dispose();
   }
 
-  // Start date can never be in the past, and can't land after the due
-  // date; the due date can't land before the start date. Previously Start
-  // date's lower bound was a flat "1 year back" with no floor at today,
-  // so picking a due date of today still let Start date offer yesterday
-  // or any earlier day -- that's what let an impossible range (start
-  // before today, or after the due date) through in the first place.
+  // Same start-date/due-date cross-bounding and auto-fill as the Add Task
+  // sheet (see add_task_sheet.dart's own doc comment) -- kept in sync so
+  // this doesn't reintroduce the "due today but start date still offers
+  // yesterday" glitch that prompted fixing it there.
   Future<void> _pickDate({required bool isStart}) async {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final initial = (isStart ? _startDate : _dueDate) ?? today;
     final firstDate = isStart ? today : (_startDate ?? today);
-    final lastDate = isStart ? (_dueDate ?? DateTime(now.year + 5)) : DateTime(now.year + 5);
+    // An already-existing task being edited can have a due date that's
+    // already in the past (e.g. it's overdue) -- floor lastDate at
+    // firstDate so that never produces an invalid (lastDate < firstDate)
+    // range for showDatePicker, which asserts on that. The 5-minute edit
+    // lock (server-side) is what actually stops the save on a task like
+    // that, not the picker's own bounds.
+    final rawLastDate = isStart ? (_dueDate ?? DateTime(now.year + 5)) : DateTime(now.year + 5);
+    final lastDate = rawLastDate.isBefore(firstDate) ? firstDate : rawLastDate;
     final clampedInitial = initial.isBefore(firstDate)
         ? firstDate
         : (initial.isAfter(lastDate) ? lastDate : initial);
@@ -114,14 +121,6 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
         _startDate = picked;
       } else {
         _dueDate = picked;
-        // Auto-fill (or re-clamp) Start date the moment its valid range
-        // collapses to a single sensible default -- today, or the due
-        // date itself if that's somehow earlier -- rather than leaving a
-        // now-invalid value in place or making the person open a second
-        // picker just to confirm the only real choice (e.g. due date =
-        // today leaves exactly one valid Start date: today). Left alone
-        // if they'd already picked a Start date that's still valid
-        // against this due date.
         if (_startDate == null || _startDate!.isAfter(picked)) {
           _startDate = today.isAfter(picked) ? picked : today;
         }
@@ -138,15 +137,14 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
     setState(() => _dueTime = picked);
   }
 
-  // The reminder date can be any day (independent of Start/Due) -- it's
-  // simply the moment the overdue alarm should ring, not a claim about
-  // when the work itself is due.
   Future<void> _pickReminderDate() async {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
+    final rawInitial = _reminderDate ?? today;
+    final initial = rawInitial.isBefore(today) ? today : rawInitial;
     final picked = await showDatePicker(
       context: context,
-      initialDate: _reminderDate ?? today,
+      initialDate: initial,
       firstDate: today,
       lastDate: DateTime(now.year + 5),
     );
@@ -163,24 +161,16 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
     setState(() => _reminderTime = picked);
   }
 
-  // The overdue alarm (see NotificationService) needs an exact reminder
-  // date+time to ring at, not just a calendar day -- so an Urgent task
-  // has to carry both before it can be saved. Everything else (priority
-  // left unset, or High/Normal/Low) keeps this optional.
-  void _submit() {
+  Future<void> _save() async {
     final name = _nameCtrl.text.trim();
-    if (name.isEmpty || _spaceId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pick a space and enter a task name.')),
-      );
+    if (name.isEmpty) {
+      setState(() => _error = 'Task name cannot be empty.');
       return;
     }
-    if (_priority == 'Urgent' && (_reminderDate == null || _reminderTime == null)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Urgent tasks need a reminder date and time for the alarm.')),
-      );
-      return;
-    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
 
     final dueDateTime = _dueDate == null
         ? null
@@ -202,23 +192,33 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             _reminderTime!.minute,
           );
 
-    Navigator.pop(
-      context,
-      _AddTaskResult(
+    try {
+      await updateTaskDetails(
+        widget.task['_id'].toString(),
         name: name,
-        spaceId: _spaceId!,
+        assigneeId: _assigneeId,
+        priority: _priority,
         startDate: _startDate,
         dueDate: dueDateTime,
         reminderAt: reminderDateTime,
-        priority: _priority,
-        assigneeId: _assigneeId,
-      ),
-    );
+      );
+      if (mounted) Navigator.pop(context, true);
+    } on DioException catch (e) {
+      // Surfaces the server's own message as-is (e.g. "This task was
+      // assigned more than 5 minutes ago and can no longer be edited...")
+      // rather than a generic error -- that message already explains
+      // exactly why, same as the website shows.
+      final msg = e.response?.data?['message']?.toString() ?? 'Could not save this task.';
+      setState(() => _error = msg);
+    } catch (e) {
+      setState(() => _error = 'Could not save this task.');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final spacesAsync = ref.watch(spacesProvider);
     final employeesAsync = ref.watch(assignableEmployeesProvider);
     final currentUserId = ref.watch(authProvider).user?.id;
     final dateFmt = DateFormat('dd/MM/yyyy');
@@ -235,45 +235,37 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('New task', style: Theme.of(context).textTheme.titleLarge),
+            Text('Edit task', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: Gap.lg),
 
-            TextField(controller: _nameCtrl, decoration: const InputDecoration(labelText: 'Task')),
-            const SizedBox(height: Gap.md),
+            if (_error != null) ...[
+              Container(
+                padding: const EdgeInsets.all(Gap.md),
+                decoration: BoxDecoration(
+                  color: AppColors.dangerSoft,
+                  borderRadius: BorderRadius.circular(AppRadius.field),
+                ),
+                child: Text(_error!, style: const TextStyle(color: AppColors.danger)),
+              ),
+              const SizedBox(height: Gap.md),
+            ],
 
-            spacesAsync.when(
-              data: (spaces) => DropdownButtonFormField<String>(
-                initialValue: _spaceId,
-                decoration: const InputDecoration(labelText: 'Space'),
-                items: spaces
-                    .map((s) => DropdownMenuItem<String>(
-                          value: s['_id'] as String,
-                          child: Text(s['name']?.toString() ?? 'Untitled space'),
-                        ))
-                    .toList(),
-                onChanged: (v) => setState(() => _spaceId = v),
-              ),
-              loading: () => const Padding(
-                padding: EdgeInsets.symmetric(vertical: Gap.sm),
-                child: LinearProgressIndicator(),
-              ),
-              error: (e, _) => Text('Could not load spaces.', style: Theme.of(context).textTheme.bodyMedium),
-            ),
+            TextField(controller: _nameCtrl, decoration: const InputDecoration(labelText: 'Task')),
             const SizedBox(height: Gap.md),
 
             Row(
               children: [
                 Expanded(
-                  child: _DatePickerField(
+                  child: _EditDateField(
                     label: 'Due date',
                     value: _dueDate == null ? null : dateFmt.format(_dueDate!),
                     onTap: () => _pickDate(isStart: false),
-                    onClear: _dueDate == null ? null : () => setState(() => _dueDate = null),
+                    onClear: _dueDate == null ? null : () => setState(() { _dueDate = null; _dueTime = null; }),
                   ),
                 ),
                 const SizedBox(width: Gap.md),
                 Expanded(
-                  child: _DatePickerField(
+                  child: _EditDateField(
                     label: 'Due time',
                     value: _dueTime?.format(context),
                     onTap: _pickDueTime,
@@ -288,7 +280,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             Row(
               children: [
                 Expanded(
-                  child: _DatePickerField(
+                  child: _EditDateField(
                     label: 'Start date',
                     value: _startDate == null ? null : dateFmt.format(_startDate!),
                     onTap: () => _pickDate(isStart: true),
@@ -313,16 +305,16 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             Row(
               children: [
                 Expanded(
-                  child: _DatePickerField(
+                  child: _EditDateField(
                     label: _priority == 'Urgent' ? 'Reminder date *' : 'Reminder date',
                     value: _reminderDate == null ? null : dateFmt.format(_reminderDate!),
                     onTap: _pickReminderDate,
-                    onClear: _reminderDate == null ? null : () => setState(() => _reminderDate = null),
+                    onClear: _reminderDate == null ? null : () => setState(() { _reminderDate = null; _reminderTime = null; }),
                   ),
                 ),
                 const SizedBox(width: Gap.md),
                 Expanded(
-                  child: _DatePickerField(
+                  child: _EditDateField(
                     label: _priority == 'Urgent' ? 'Reminder time *' : 'Reminder time',
                     value: _reminderTime?.format(context),
                     onTap: _pickReminderTime,
@@ -343,19 +335,12 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
 
             employeesAsync.when(
               data: (employees) {
-                // The signed-in person sorts to the top of their own list,
-                // labeled "Me" instead of their own name -- assigning a
-                // task to yourself is the single most common pick here, so
-                // it shouldn't be buried wherever their name happens to
-                // fall alphabetically among everyone else in the company.
-                // Split-then-concatenate (rather than a comparator) keeps
-                // everyone else in whatever order assignableEmployeesProvider
-                // already sorted them in, since List.sort isn't stable.
                 final me = employees.where((e) => e['_id'] == currentUserId);
                 final others = employees.where((e) => e['_id'] != currentUserId);
                 final sorted = [...me, ...others];
+                final hasCurrentAssignee = sorted.any((e) => e['_id'] == _assigneeId);
                 return DropdownButtonFormField<String>(
-                  initialValue: _assigneeId,
+                  initialValue: hasCurrentAssignee ? _assigneeId : null,
                   decoration: const InputDecoration(labelText: 'Assign to'),
                   items: sorted
                       .map((e) => DropdownMenuItem<String>(
@@ -374,7 +359,12 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             ),
             const SizedBox(height: Gap.xl),
 
-            FilledButton(onPressed: _submit, child: const Text('Add task')),
+            FilledButton(
+              onPressed: _saving ? null : _save,
+              child: _saving
+                  ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Text('Save changes'),
+            ),
           ],
         ),
       ),
@@ -382,13 +372,13 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   }
 }
 
-class _DatePickerField extends StatelessWidget {
+class _EditDateField extends StatelessWidget {
   final String label;
   final String? value;
   final VoidCallback onTap;
   final VoidCallback? onClear;
   final IconData icon;
-  const _DatePickerField({
+  const _EditDateField({
     required this.label,
     required this.value,
     required this.onTap,

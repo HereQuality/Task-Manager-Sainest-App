@@ -64,6 +64,32 @@ class PendingAttachmentService {
   static const _channel = MethodChannel('com.hqepl.qtask360/document_picker');
   static const _pendingTaskIdKey = 'pending_attachment_task_id';
 
+  /// True for exactly the span of an in-flight ImagePicker().pickImage
+  /// (camera) call in task_attachments_section.dart's normal _takePhoto()
+  /// path. recoverPendingUpload() below checks this before touching the
+  /// camera at all.
+  ///
+  /// didChangeAppLifecycleState(resumed) in main.dart fires on EVERY return
+  /// from the camera, not just the rare Activity-teardown case this
+  /// recovery exists for -- most phones never tear the Activity down at
+  /// all. Without this guard, resumed firing (which can happen slightly
+  /// before pickImage()'s own Future resolves) raced retrieveLostData()
+  /// against that still-pending pickImage() call for the exact same photo.
+  /// Losing that race meant the normal path silently got null back (no
+  /// upload, no error message -- both of _takePhoto()'s try/catch branches
+  /// only fire on an actual exception, not on "someone else already
+  /// consumed the result"), while the recovery path uploaded it directly
+  /// and asynchronously instead -- exactly the "nothing happens on the
+  /// first photo, then it appears ~10s into a later attempt" symptom.
+  ///
+  /// Deliberately a plain in-memory bool, not persisted: a genuine
+  /// teardown wipes the whole Dart VM (see MainActivity.kt's own doc
+  /// comment -- a second FlutterEngine gets spun up), so the fresh
+  /// PendingAttachmentService instance that recovery actually needs to run
+  /// under always starts with this back at false, never stuck permanently
+  /// true from a pick that's never coming back.
+  bool cameraPickInFlight = false;
+
   /// Records which task an about-to-be-picked file belongs to. Must be
   /// called before launching any picker -- see the class doc for why the
   /// task id can't just be held in the calling widget's state.
@@ -139,6 +165,10 @@ class PendingAttachmentService {
   /// nothing to recover.
   Future<String?> recoverPendingUpload() async {
     if (!Platform.isAndroid) return null;
+    // A normal, still-in-progress camera pick owns this result -- see
+    // cameraPickInFlight's own doc comment for why skipping entirely here
+    // (rather than racing retrieveLostData against it) is the fix.
+    if (cameraPickInFlight) return null;
 
     final taskId = await _pendingTarget();
     if (taskId == null) return null;
@@ -151,10 +181,10 @@ class PendingAttachmentService {
     pendingAttachmentTaskNotifier.value = taskId;
 
     final path = await _consumePendingDocument() ?? await _consumeLostCameraShot();
-    // Nothing came back, so the person cancelled the picker (a still-open
-    // picker means the app isn't resumed and this hasn't run yet). Drop the
-    // stale target so it can't attach itself to some later, unrelated pick,
-    // and release the spinner.
+    // Nothing came back -- normally because the person cancelled the
+    // picker (a still-open picker means the app isn't resumed and this
+    // hasn't run yet). Drop the stale target so it can't attach itself to
+    // some later, unrelated pick, and release the spinner.
     if (path == null) {
       await clearPendingTarget();
       attachmentUploadingNotifier.value = false;

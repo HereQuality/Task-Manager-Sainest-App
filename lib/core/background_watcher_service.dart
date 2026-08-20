@@ -7,6 +7,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
+import 'notification_schedule.dart';
 import 'notification_service.dart';
 import 'task_update_tracker.dart';
 import '../providers/tasks_provider.dart';
@@ -33,6 +34,12 @@ const _alertedApprovalIdsKey = 'approval_alerted_task_ids';
 // was already handled and never bring the alarm back through this (the
 // reliable) path once the snooze window passed.
 const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
+// businessDayKeyFor(...) of the last day a digest was actually sent --
+// compared against today's key so the 5-minute detection window in
+// isWithinOfficeStartWindow/isWithinOfficeEndWindow can't send more than
+// one morning/evening digest per business day.
+const _digestMorningSentKey = 'digest_morning_sent_day';
+const _digestEveningSentKey = 'digest_evening_sent_day';
 
 const _watcherChannelId = 'hqepl_watcher';
 
@@ -221,10 +228,16 @@ Future<void> _runTick() async {
   try {
     final tasks = await _fetchMyTasks();
     print('[WATCHER] tick ok at $startedAt, ${tasks.length} tasks fetched');
-    await _checkOverdueTasksOnce(tasks);
-    await _checkTaskUpdatesOnce(tasks);
-    await _checkTeamEscalationsOnce();
-    await _checkPendingApprovalsOnce();
+    // Company-wide holidays/weekly-off/office-hours window (see
+    // notification_schedule.dart) -- fetched once per tick and reused by
+    // every check below, same rule notifications_provider.dart's
+    // foreground pass applies.
+    final schedule = await fetchNotificationSchedule();
+    await _checkOverdueTasksOnce(tasks, schedule);
+    await _checkTaskUpdatesOnce(tasks, schedule);
+    await _checkTeamEscalationsOnce(schedule);
+    await _checkPendingApprovalsOnce(schedule);
+    await _checkDailyDigestOnce(tasks, schedule);
   } catch (e, st) {
     // Best-effort: a single failed poll (offline, expired token, server
     // hiccup) shouldn't kill the loop -- _scheduleNextTick() below still
@@ -241,7 +254,7 @@ Future<List<Map<String, dynamic>>> _fetchMyTasks() async {
   return List<Map<String, dynamic>>.from(data);
 }
 
-Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
+Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
   final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet();
@@ -277,9 +290,11 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
     if (taskAssigneeId == null || taskAssigneeId != currentUserId) continue;
     urgentCount++;
 
-    final dueRaw = t['dueDate'];
-    if (dueRaw == null) continue;
-    final due = DateTime.tryParse(dueRaw.toString());
+    // The alarm rings at reminderAt now, not dueDate -- see the matching
+    // change in notifications_provider.dart's foreground pass.
+    final reminderRaw = t['reminderAt'];
+    if (reminderRaw == null) continue;
+    final due = DateTime.tryParse(reminderRaw.toString());
     if (due == null || !due.isBefore(now)) continue;
 
     final title = (t['title'] ?? t['name'] ?? 'Untitled task').toString();
@@ -309,9 +324,20 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
       snoozeMapChanged = true;
     }
 
+    final alreadyAlerted = alertedIds.contains(id);
+    if (!alreadyAlerted && !schedule.isWithinWindow(now)) {
+      // Outside the notification window and never actually alerted yet --
+      // deliberately left OUT of stillOverdueIds so it stays pending
+      // rather than getting marked "already alerted" for an alarm that
+      // never rang; a later tick once back inside the window catches it
+      // up instead. See notifications_provider.dart's foreground pass
+      // for the same reasoning.
+      print('[WATCHER] taskId=$id overdue but outside notification window, deferring');
+      continue;
+    }
     stillOverdueIds.add(id);
 
-    if (!alertedIds.contains(id)) {
+    if (!alreadyAlerted) {
       print('[WATCHER] firing overdue alarm for taskId=$id "$title" due=$due (now=$now)');
       await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
     } else {
@@ -343,31 +369,69 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks) async {
 // respects the person's "Allow notifications" master toggle, read
 // directly from SharedPreferences since this isolate has no Riverpod
 // ProviderScope to watch settingsProvider through.
-Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks) async {
+Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
   if (!(prefs.getBool('notif_master') ?? true)) return;
   // Same split as notifications_provider.dart's foreground pass -- see
   // settings_provider.dart's doc comment on taskAssigned/taskUpdates.
-  // Deliberately still calls detectTaskChanges below even when both are
-  // off, rather than returning early -- that call is what advances its
-  // own persisted "already seen" snapshot (task_update_tracker.dart), so
-  // skipping it entirely while muted would let changes pile up and all
-  // flood in at once the moment notifications are turned back on.
+  // Deliberately still calls detectTaskChanges below even when muted by
+  // the toggle, rather than returning early -- that call is what advances
+  // its own persisted "already seen" snapshot (task_update_tracker.dart),
+  // so skipping it entirely while muted would let changes pile up and all
+  // flood in at once the moment notifications are turned back on (a
+  // deliberate "drop forever while muted" design).
+  //
+  // Outside the notification window is different: those changes SHOULD
+  // still be reported, just later -- so detectTaskChanges is skipped
+  // ENTIRELY in that case (not called at all), leaving its snapshot
+  // un-advanced, so the very next tick that runs back inside the window
+  // sees them as still-unseen and reports them then instead of losing
+  // them.
+  final myTaskAllowed = prefs.getBool('notif_my_task') ?? true;
+  // Same team-member mirror as notifications_provider.dart's foreground
+  // pass -- see settings_provider.dart's doc comment on
+  // teamTaskNotifications.
+  final teamTaskAllowed = prefs.getBool('notif_team_task') ?? true;
+  final anyTaskActivityWanted = myTaskAllowed || teamTaskAllowed;
+  if (anyTaskActivityWanted && !schedule.isWithinWindow(DateTime.now())) return;
+
   final assignedAllowed = prefs.getBool('notif_task_assigned') ?? true;
   final updatesAllowed = prefs.getBool('notif_task_updates') ?? true;
+  final teamAssignedAllowed = prefs.getBool('notif_team_task_assigned') ?? true;
+  final teamUpdatesAllowed = prefs.getBool('notif_team_task_updates') ?? true;
 
   final currentUserId = await ApiClient.instance.readCurrentUserId();
+  final assigneeNameByTaskId = {
+    for (final t in tasks)
+      (t['_id'] ?? t['id'] ?? '').toString(): (t['assigneeId'] is Map ? t['assigneeId']['employeeName'] : null)?.toString(),
+  };
   for (final change in await detectTaskChanges(tasks, currentUserId: currentUserId)) {
-    if (change.isNew ? !assignedAllowed : !updatesAllowed) continue;
-    final body = change.activityMessage ??
-        (change.isNew ? 'Assigned to you' : 'Task updated') +
-            (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
-    await NotificationService.instance.showTaskUpdateNotification(
-      taskId: change.taskId,
-      title: change.isNew ? 'New task: ${change.title}' : change.title,
-      body: body,
-    );
+    final isMine = currentUserId != null && change.assigneeId == currentUserId;
+    if (isMine) {
+      if (!myTaskAllowed) continue;
+      if (change.isNew ? !assignedAllowed : !updatesAllowed) continue;
+      final body = change.activityMessage ??
+          (change.isNew ? 'Assigned to you' : 'Task updated') +
+              (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
+      await NotificationService.instance.showTaskUpdateNotification(
+        taskId: change.taskId,
+        title: change.isNew ? 'New task: ${change.title}' : change.title,
+        body: body,
+      );
+    } else {
+      if (!teamTaskAllowed) continue;
+      if (change.isNew ? !teamAssignedAllowed : !teamUpdatesAllowed) continue;
+      final assigneeName = assigneeNameByTaskId[change.taskId] ?? 'A team member';
+      final body = change.activityMessage ??
+          (change.isNew ? 'Assigned to $assigneeName' : 'Updated') +
+              (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
+      await NotificationService.instance.showTaskUpdateNotification(
+        taskId: change.taskId,
+        title: change.isNew ? 'New team task: ${change.title}' : 'Team task updated: ${change.title}',
+        body: body,
+      );
+    }
   }
 }
 
@@ -376,7 +440,7 @@ Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks) async {
 // _alertedEscalationIdsKey record so a manager isn't notified twice for
 // the same overdue task once from each path. Safe to call for anyone;
 // the endpoint just returns an empty list for a non-manager.
-Future<void> _checkTeamEscalationsOnce() async {
+Future<void> _checkTeamEscalationsOnce(NotificationSchedule schedule) async {
   final escalations = await fetchTeamOverdueEscalations();
   if (escalations.isEmpty) return;
 
@@ -385,18 +449,28 @@ Future<void> _checkTeamEscalationsOnce() async {
   final alertedIds = (prefs.getStringList(_alertedEscalationIdsKey) ?? []).toSet();
   final stillEscalatedIds = <String>{};
   // Its own toggle -- see settings_provider.dart's doc comment on
-  // teamEscalations. stillEscalatedIds is still accumulated and saved
-  // below even while muted (same reasoning as _checkTaskUpdatesOnce
-  // above): only the actual notification post is skipped, so an
-  // escalation that was already showing before the toggle got muted
-  // doesn't re-fire the instant it's turned back on.
+  // teamEscalations.
   final escalationsAllowed = prefs.getBool('notif_team_escalations') ?? true;
+  final withinWindow = schedule.isWithinWindow(DateTime.now());
 
   for (final t in escalations) {
     final id = (t['_id'] ?? '').toString();
     if (id.isEmpty) continue;
+    final alreadyAlerted = alertedIds.contains(id);
+    if (alreadyAlerted) {
+      stillEscalatedIds.add(id);
+      continue;
+    }
+    if (!escalationsAllowed) {
+      // Muted by the toggle -- deliberately still marked seen (same
+      // "drop forever while muted" reasoning as _checkTaskUpdatesOnce),
+      // independent of the notification window: the person doesn't want
+      // this at all, not "later instead of now".
+      stillEscalatedIds.add(id);
+      continue;
+    }
+    if (!withinWindow) continue; // allowed by the toggle, but outside the window -- leave pending
     stillEscalatedIds.add(id);
-    if (alertedIds.contains(id) || !escalationsAllowed) continue;
     final title = (t['name'] ?? 'Untitled task').toString();
     final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
     final spaceName = (t['spaceName'] ?? '').toString();
@@ -415,7 +489,7 @@ Future<void> _checkTeamEscalationsOnce() async {
 // _alertedApprovalIdsKey record. Safe to call for anyone; the endpoint
 // just returns an empty list for someone with no pending delegated
 // completions.
-Future<void> _checkPendingApprovalsOnce() async {
+Future<void> _checkPendingApprovalsOnce(NotificationSchedule schedule) async {
   final approvals = await fetchPendingApprovals();
   if (approvals.isEmpty) return;
 
@@ -424,15 +498,26 @@ Future<void> _checkPendingApprovalsOnce() async {
   final alertedIds = (prefs.getStringList(_alertedApprovalIdsKey) ?? []).toSet();
   final stillPendingIds = <String>{};
   // Its own toggle -- see settings_provider.dart's doc comment on
-  // approvalAlerts. Same "still track seen, just skip the post" reasoning
-  // as _checkTeamEscalationsOnce above.
+  // approvalAlerts.
   final approvalsAllowed = prefs.getBool('notif_approval_alerts') ?? true;
+  final withinWindow = schedule.isWithinWindow(DateTime.now());
 
   for (final t in approvals) {
     final id = (t['_id'] ?? '').toString();
     if (id.isEmpty) continue;
+    final alreadyAlerted = alertedIds.contains(id);
+    if (alreadyAlerted) {
+      stillPendingIds.add(id);
+      continue;
+    }
+    if (!approvalsAllowed) {
+      // Muted by the toggle -- same "drop forever while muted" reasoning
+      // as _checkTeamEscalationsOnce, independent of the window.
+      stillPendingIds.add(id);
+      continue;
+    }
+    if (!withinWindow) continue; // allowed by the toggle, but outside the window -- leave pending
     stillPendingIds.add(id);
-    if (alertedIds.contains(id) || !approvalsAllowed) continue;
     final title = (t['name'] ?? 'Untitled task').toString();
     final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
     final spaceName = (t['spaceName'] ?? '').toString();
@@ -444,4 +529,114 @@ Future<void> _checkPendingApprovalsOnce() async {
   }
 
   await prefs.setStringList(_alertedApprovalIdsKey, {...alertedIds, ...stillPendingIds}.toList());
+}
+
+// Morning "today's tasks" summary and end-of-day "how the day went"
+// summary, anchored to the company's configured office start/end times
+// (schedule.isWithinOfficeStartWindow/isWithinOfficeEndWindow) rather than
+// a fixed hour -- same schedule the office-hours suppression elsewhere in
+// this file already reads, so the digest naturally moves if the company's
+// hours change. Deliberately Android-only (this whole file is, per
+// initializeBackgroundWatcher's own doc comment) -- an iOS zonedSchedule
+// equivalent can't compute live task counts at fire time the way a
+// polling tick can, only whatever was true when it was scheduled, so it's
+// left out rather than shipping a digest that's stale by definition.
+//
+// Scoped to tasks assigned directly to this device's own signed-in person
+// (not the wider manager/subordinate mix `tasks` carries for
+// _checkOverdueTasksOnce etc.) -- this is "your own day", not a
+// team roll-up.
+Future<void> _checkDailyDigestOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule) async {
+  // No office hours configured means no anchor time to send at -- rather
+  // than guessing a fallback hour, the digest simply stays off until a
+  // Full Access person sets one on the Teams page.
+  if (!schedule.officeHoursEnabled) return;
+
+  final now = DateTime.now();
+  final atStart = schedule.isWithinOfficeStartWindow(now);
+  final atEnd = schedule.isWithinOfficeEndWindow(now);
+  if (!atStart && !atEnd) return;
+
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.reload();
+  if (!(prefs.getBool('notif_master') ?? true)) return;
+  // Its own toggle -- see settings_provider.dart's doc comment on
+  // dailyDigest.
+  if (!(prefs.getBool('notif_daily_digest') ?? true)) return;
+
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+  if (currentUserId == null) return;
+
+  final todayKey = businessDayKeyFor(now);
+  final mine = tasks.where((t) {
+    final raw = t['assigneeId'];
+    final id = (raw is Map ? raw['_id'] : raw)?.toString();
+    return id != null && id == currentUserId;
+  }).toList();
+
+  if (atStart && prefs.getString(_digestMorningSentKey) != todayKey) {
+    await NotificationService.instance.showMorningDigest(
+      title: 'Good morning',
+      body: _buildMorningDigestBody(mine, now),
+    );
+    await prefs.setString(_digestMorningSentKey, todayKey);
+  }
+
+  if (atEnd && prefs.getString(_digestEveningSentKey) != todayKey) {
+    await NotificationService.instance.showEveningDigest(
+      title: "Today's summary",
+      body: _buildEveningDigestBody(mine, now),
+    );
+    await prefs.setString(_digestEveningSentKey, todayKey);
+  }
+}
+
+bool _statusContains(Map<String, dynamic> t, String needle) => (t['status'] ?? '').toString().toLowerCase().contains(needle);
+
+bool _isTaskComplete(Map<String, dynamic> t) => _statusContains(t, 'complete') || _statusContains(t, 'done');
+
+DateTime? _dueDateOf(Map<String, dynamic> t) {
+  final raw = t['dueDate'] ?? t['reminderAt'];
+  return raw == null ? null : DateTime.tryParse(raw.toString());
+}
+
+String _pluralTask(int n) => n == 1 ? '1 task' : '$n tasks';
+
+String _buildMorningDigestBody(List<Map<String, dynamic>> mine, DateTime now) {
+  final todayKey = businessDayKeyFor(now);
+  final active = mine.where((t) => !_isTaskComplete(t));
+  final dueToday = active.where((t) {
+    final due = _dueDateOf(t);
+    return due != null && businessDayKeyFor(due) == todayKey;
+  }).length;
+  final inProgress = active.where((t) => _statusContains(t, 'progress')).length;
+
+  if (dueToday == 0 && inProgress == 0) {
+    return "You've got a clear board this morning -- no tasks due today. Have a great day.";
+  }
+  final duePart = '${_pluralTask(dueToday)} due today';
+  final progressPart = inProgress == 1 ? '1 already in progress' : '$inProgress already in progress';
+  return 'You have $duePart, $progressPart. Wishing you a productive day ahead.';
+}
+
+String _buildEveningDigestBody(List<Map<String, dynamic>> mine, DateTime now) {
+  final todayKey = businessDayKeyFor(now);
+  final completedToday = mine.where((t) {
+    if (!_isTaskComplete(t)) return false;
+    final updatedRaw = t['updatedAt'];
+    final updated = updatedRaw == null ? null : DateTime.tryParse(updatedRaw.toString());
+    return updated != null && businessDayKeyFor(updated) == todayKey;
+  }).length;
+  final active = mine.where((t) => !_isTaskComplete(t));
+  final inProgress = active.where((t) => _statusContains(t, 'progress')).length;
+  final overdue = active.where((t) {
+    final due = _dueDateOf(t);
+    return due != null && due.isBefore(now);
+  }).length;
+
+  final summary = '${_pluralTask(completedToday)} completed, ${_pluralTask(inProgress)} in progress, ${_pluralTask(overdue)} overdue';
+  if (overdue > 0) {
+    return "Here's how today went: $summary. Worth a look before tomorrow.";
+  }
+  return "Here's how today went: $summary. Thank you for a productive day.";
 }

@@ -1,12 +1,12 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import '../core/notification_service.dart';
 import '../core/theme.dart';
-import '../providers/notifications_provider.dart';
-import '../providers/tasks_provider.dart';
 
-/// The full-screen "ringing" view for an overdue task -- reached when the
+/// The full-screen "ringing" view for a task reminder -- reached when the
 /// alarm notification's full-screen intent fires (device locked or
 /// screen off) or is tapped (device unlocked), via router.dart's redirect
 /// watching NotificationService's pendingAlarmNotifier. Deliberately its
@@ -19,11 +19,15 @@ class AlarmScreen extends ConsumerStatefulWidget {
   ConsumerState<AlarmScreen> createState() => _AlarmScreenState();
 }
 
-class _AlarmScreenState extends ConsumerState<AlarmScreen> {
+class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProviderStateMixin {
   late final String _taskId;
   late final String _taskName;
   late final String _spaceName;
   bool _busy = false;
+
+  late final AnimationController _pulseController;
+  late final Timer _clockTimer;
+  DateTime _now = DateTime.now();
 
   @override
   void initState() {
@@ -33,8 +37,8 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
     _taskName = (data['taskName'] ?? 'Task').toString();
     _spaceName = (data['spaceName'] ?? '').toString();
     // Consumed -- clears the router's redirect trigger so leaving this
-    // screen (Snooze/Complete, or the back gesture) doesn't immediately
-    // bounce straight back into it. Deferred to after this frame:
+    // screen (Snooze/End) doesn't immediately bounce straight back into
+    // it. Deferred to after this frame:
     // clearing it synchronously here notifies the router's
     // refreshListenable WHILE this very widget is still being built as
     // part of that same redirect, which crashes with "setState() or
@@ -42,13 +46,35 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
     // from inside a widget's own initState, mid-build, is never legal).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       pendingAlarmNotifier.value = null;
+      // Defensive: if this screen was somehow reached with no task id
+      // (a malformed/stale trigger), Snooze and End both silently no-op
+      // on an empty id (see below) and the back gesture is blocked by
+      // PopScope(canPop: false) -- leaving no way off this screen at
+      // all, which reads as the app having crashed/frozen. Bouncing
+      // straight back to Home is strictly better than a full-screen red
+      // alarm nobody can dismiss.
+      if (_taskId.isEmpty && mounted) context.go('/home');
+    });
+
+    // Slow, looping ring pulse behind the alarm icon -- purely decorative,
+    // but it's what reads as "actively ringing" rather than a static error
+    // screen at a glance, same cue a real alarm clock's flashing display
+    // gives.
+    _pulseController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1800))..repeat();
+    // A live clock is what makes this feel like an actual alarm clock face
+    // instead of a generic error dialog -- ticks once a second, cheap
+    // enough not to matter next to the pulse animation already rebuilding
+    // every frame.
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _now = DateTime.now());
     });
   }
 
-  void _refreshTaskData() {
-    ref.invalidate(myTasksProvider);
-    ref.invalidate(dashboardStatsProvider);
-    ref.invalidate(notificationsFeedProvider);
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    _clockTimer.cancel();
+    super.dispose();
   }
 
   static const _snoozeOptions = [
@@ -62,21 +88,28 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
     if (_taskId.isEmpty || _busy) return;
     final chosen = await showModalBottomSheet<Duration>(
       context: context,
-      backgroundColor: AppColors.danger,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      backgroundColor: const Color(0xFF7A1030),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (sheetContext) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            const SizedBox(height: Gap.sm),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+            ),
             const Padding(
               padding: EdgeInsets.fromLTRB(Gap.lg, Gap.lg, Gap.lg, Gap.sm),
               child: Text(
-                'Snooze for',
-                style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, letterSpacing: 1, fontSize: 13),
+                'SNOOZE FOR',
+                style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w700, letterSpacing: 1.5, fontSize: 12),
               ),
             ),
             for (final option in _snoozeOptions)
               ListTile(
+                leading: const Icon(Icons.snooze_rounded, color: Colors.white70),
                 title: Text(
                   option.$1,
                   style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 17),
@@ -95,16 +128,16 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
     if (_taskId.isEmpty || _busy || !mounted) return;
     setState(() => _busy = true);
     try {
-      // Unlike completeOverdueTask/cancelOverdueAlarm below (both
-      // best-effort -- their own internals swallow every error), this can
-      // genuinely throw: scheduleOverdueAlarmAt deliberately rethrows a
-      // failed zonedSchedule call (see its own doc comment) so a caller
-      // that cares can tell "scheduled" apart from "silently didn't".
-      // Without this try/catch, that exception used to propagate straight
-      // out of this async callback uncaught -- _busy stayed true forever
-      // (nothing below it ever ran to reset it) and every button on this
-      // screen (Snooze/End/Complete are all gated on _busy) went dead,
-      // trapping the person on a still-ringing alarm with no way off it.
+      // Unlike cancelOverdueAlarm below (best-effort -- its own internals
+      // swallow every error), this can genuinely throw: scheduleOverdueAlarmAt
+      // deliberately rethrows a failed zonedSchedule call (see its own doc
+      // comment) so a caller that cares can tell "scheduled" apart from
+      // "silently didn't". Without this try/catch, that exception used to
+      // propagate straight out of this async callback uncaught -- _busy
+      // stayed true forever (nothing below it ever ran to reset it) and
+      // every button on this screen (Snooze/End are both gated on _busy)
+      // went dead, trapping the person on a still-ringing alarm with no
+      // way off it.
       await NotificationService.instance.snoozeOverdueAlarm(
         taskId: _taskId,
         taskName: _taskName,
@@ -122,33 +155,20 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
   }
 
   // "End" -- silences this ringing/pending alarm without marking the task
-  // complete, unlike _complete below. Just cancels whatever alarm is
-  // currently scheduled for it (the one that just rang, or a snooze that
-  // hadn't fired yet); it deliberately does NOT touch the task's status, so
-  // it stays overdue in the task list same as before. Since the task was
+  // complete. Just cancels whatever alarm is currently scheduled for it
+  // (the one that just rang, or a snooze that hadn't fired yet); it
+  // deliberately does NOT touch the task's status, so an overdue task
+  // stays overdue in the task list same as before. Since the task was
   // already recorded in the "alerted" set the moment this alarm first
   // fired (see background_watcher_service.dart/notifications_provider.dart's
   // shared alertedIds tracking), it won't ring again on its own -- only a
-  // real change to the task (a new due date pushing it overdue again) can
-  // bring the alarm back.
+  // real change to the task's reminder time can bring the alarm back.
   Future<void> _end() async {
     if (_taskId.isEmpty || _busy) return;
     setState(() => _busy = true);
     await NotificationService.instance.cancelOverdueAlarm(_taskId);
     if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Alarm dismissed — task is still overdue')));
-      context.go('/home');
-    }
-  }
-
-  Future<void> _complete() async {
-    if (_taskId.isEmpty || _busy) return;
-    setState(() => _busy = true);
-    await NotificationService.instance.completeOverdueTask(_taskId);
-    _refreshTaskData();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Task marked complete')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Alarm dismissed')));
       context.go('/home');
     }
   }
@@ -156,8 +176,8 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
   @override
   Widget build(BuildContext context) {
     // Blocks the back gesture/button from silently dismissing an active
-    // alarm -- Snooze or Complete are the only ways out, same as a real
-    // alarm clock.
+    // alarm -- Snooze or End are the only ways out, same as a real alarm
+    // clock.
     // The old layout used bare Spacer()s in an unscrollable Column -- fine
     // on the one test device this screen was built against, but Spacer
     // can't shrink below its natural size, so a short phone screen, a
@@ -172,72 +192,118 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
     return PopScope(
       canPop: false,
       child: Scaffold(
-        backgroundColor: AppColors.danger,
-        body: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) => SingleChildScrollView(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                child: Padding(
-                  padding: const EdgeInsets.all(Gap.xl),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SizedBox(height: Gap.xl),
-                          Container(
-                            width: 88,
-                            height: 88,
-                            decoration: const BoxDecoration(color: Colors.white24, shape: BoxShape.circle),
-                            child: const Icon(Icons.alarm_rounded, color: Colors.white, size: 44),
-                          ),
-                          const SizedBox(height: Gap.lg),
-                          const Text(
-                            'TASK OVERDUE',
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 3,
-                              fontSize: 13,
-                            ),
-                          ),
-                          const SizedBox(height: Gap.md),
-                          Text(
-                            _taskName,
-                            textAlign: TextAlign.center,
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: Colors.white, fontWeight: FontWeight.w800, fontSize: 28, height: 1.2),
-                          ),
-                          if (_spaceName.isNotEmpty) ...[
-                            const SizedBox(height: Gap.sm),
+        body: DecoratedBox(
+          // A diagonal gradient reads far more like a deliberately designed
+          // "alarm" surface than the old flat AppColors.danger fill did,
+          // while staying inside the same red family so status/urgency
+          // still reads instantly.
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFFFF4D6D), Color(0xFFB3123B), Color(0xFF6E0B29)],
+            ),
+          ),
+          child: SafeArea(
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(Gap.xl, Gap.lg, Gap.xl, Gap.xl),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
                             Text(
-                              _spaceName,
-                              textAlign: TextAlign.center,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w600),
+                              DateFormat('h:mm').format(_now),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w300,
+                                fontSize: 64,
+                                height: 1,
+                                letterSpacing: -1,
+                              ),
                             ),
+                            Text(
+                              DateFormat('a · EEEE, d MMM').format(_now).toUpperCase(),
+                              style: const TextStyle(
+                                color: Colors.white60,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 12,
+                                letterSpacing: 2,
+                              ),
+                            ),
+                            const SizedBox(height: Gap.xxl),
+                            _PulsingAlarmIcon(controller: _pulseController),
+                            const SizedBox(height: Gap.lg),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.16),
+                                borderRadius: BorderRadius.circular(AppRadius.chip),
+                              ),
+                              child: const Text(
+                                'TASK REMINDER',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 3,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: Gap.lg),
+                            Text(
+                              _taskName,
+                              textAlign: TextAlign.center,
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: Colors.white, fontWeight: FontWeight.w800, fontSize: 28, height: 1.2),
+                            ),
+                            if (_spaceName.isNotEmpty) ...[
+                              const SizedBox(height: Gap.sm),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(AppRadius.chip),
+                                  border: Border.all(color: Colors.white24),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.folder_outlined, color: Colors.white70, size: 14),
+                                    const SizedBox(width: 6),
+                                    Flexible(
+                                      child: Text(
+                                        _spaceName,
+                                        textAlign: TextAlign.center,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                            color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w600),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           ],
-                        ],
-                      ),
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SizedBox(height: Gap.xl),
-                          _buildActionRow(),
-                          const SizedBox(height: Gap.md),
-                          _SlideToComplete(
-                            busy: _busy,
-                            onComplete: _complete,
-                          ),
-                          const SizedBox(height: Gap.sm),
-                        ],
-                      ),
-                    ],
+                        ),
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(height: Gap.xl),
+                            _buildActionRow(),
+                            const SizedBox(height: Gap.sm),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -252,26 +318,38 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
     return Row(
       children: [
         Expanded(
-          child: OutlinedButton(
+          child: OutlinedButton.icon(
             onPressed: _busy ? null : _pickSnoozeDuration,
+            icon: const Icon(Icons.snooze_rounded, size: 20),
+            label: const Text('Snooze'),
             style: OutlinedButton.styleFrom(
-              minimumSize: const Size.fromHeight(52),
-              side: const BorderSide(color: Colors.white, width: 1.5),
+              minimumSize: const Size.fromHeight(56),
+              side: const BorderSide(color: Colors.white70, width: 1.5),
               foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.chip)),
+              textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
             ),
-            child: const Text('Snooze', style: TextStyle(fontWeight: FontWeight.w700)),
           ),
         ),
         const SizedBox(width: Gap.md),
         Expanded(
-          child: OutlinedButton(
+          child: FilledButton.icon(
             onPressed: _busy ? null : _end,
-            style: OutlinedButton.styleFrom(
-              minimumSize: const Size.fromHeight(52),
-              side: const BorderSide(color: Colors.white54, width: 1.5),
-              foregroundColor: Colors.white70,
+            icon: _busy
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2.2, color: AppColors.danger),
+                  )
+                : const Icon(Icons.notifications_off_rounded, size: 20),
+            label: const Text('End'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(56),
+              backgroundColor: Colors.white,
+              foregroundColor: AppColors.danger,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.chip)),
+              textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
             ),
-            child: const Text('End', style: TextStyle(fontWeight: FontWeight.w700)),
           ),
         ),
       ],
@@ -279,126 +357,56 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> {
   }
 }
 
-/// iOS-style "slide to unlock" control, repurposed as "slide to complete".
-/// Deliberately a drag gesture rather than a tap target -- a single stray
-/// tap dismissing a real alarm (or accidentally completing the wrong task
-/// half-asleep) is the exact failure mode PopScope(canPop: false) above is
-/// already guarding against for the back button; requiring a full
-/// deliberate swipe across the track applies that same "hard to trigger by
-/// accident" bar to the Complete action too.
-class _SlideToComplete extends StatefulWidget {
-  const _SlideToComplete({required this.busy, required this.onComplete});
+/// The alarm icon sits inside two rings that expand and fade out on a
+/// loop, restarting from the center each cycle -- the same "sonar ping"
+/// cue most alarm/call UIs use to signal "this is actively happening now",
+/// which a static icon can't communicate on its own.
+class _PulsingAlarmIcon extends StatelessWidget {
+  const _PulsingAlarmIcon({required this.controller});
 
-  final bool busy;
-  final VoidCallback onComplete;
-
-  @override
-  State<_SlideToComplete> createState() => _SlideToCompleteState();
-}
-
-class _SlideToCompleteState extends State<_SlideToComplete> with SingleTickerProviderStateMixin {
-  static const _trackHeight = 60.0;
-  static const _thumbPadding = 4.0;
-  static const _thumbSize = _trackHeight - _thumbPadding * 2;
-
-  late final AnimationController _snapBack = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 220),
-  );
-  double _dragX = 0;
-  double _maxDrag = 0;
-  bool _completed = false;
-
-  @override
-  void dispose() {
-    _snapBack.dispose();
-    super.dispose();
-  }
-
-  void _onPanUpdate(DragUpdateDetails details) {
-    if (widget.busy || _completed || _maxDrag <= 0) return;
-    setState(() => _dragX = (_dragX + details.delta.dx).clamp(0, _maxDrag));
-  }
-
-  void _onPanEnd(DragEndDetails details) {
-    if (widget.busy || _completed || _maxDrag <= 0) return;
-    // 75% across counts as "completed the slide" -- matches the forgiving
-    // threshold iOS's own slide-to-unlock uses, since dragging a thumb
-    // fully into the far rounded corner pixel-for-pixel is fiddly on a
-    // real device (one-handed, half-asleep, screen still locked).
-    if (_dragX >= _maxDrag * 0.75) {
-      _completeSlide();
-    } else {
-      _animateTo(0);
-    }
-  }
-
-  void _completeSlide() {
-    setState(() => _completed = true);
-    _animateTo(_maxDrag);
-    widget.onComplete();
-  }
-
-  void _animateTo(double target) {
-    final start = _dragX;
-    _snapBack
-      ..reset()
-      ..addListener(() {
-        setState(() => _dragX = start + (target - start) * _snapBack.value);
-      })
-      ..forward();
-  }
+  final AnimationController controller;
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        _maxDrag = constraints.maxWidth - _thumbSize - _thumbPadding * 2;
-        final progress = _maxDrag > 0 ? (_dragX / _maxDrag).clamp(0.0, 1.0) : 0.0;
-        return Container(
-          height: _trackHeight,
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.18),
-            borderRadius: BorderRadius.circular(_trackHeight / 2),
-            border: Border.all(color: Colors.white24, width: 1),
-          ),
-          child: Stack(
-            alignment: Alignment.centerLeft,
+    return SizedBox(
+      width: 160,
+      height: 160,
+      child: AnimatedBuilder(
+        animation: controller,
+        builder: (context, _) {
+          return Stack(
+            alignment: Alignment.center,
             children: [
-              Center(
-                child: Opacity(
-                  opacity: 1 - progress,
-                  child: const Text(
-                    'Slide to complete',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, letterSpacing: 0.5),
-                  ),
+              _pulseRing(controller.value),
+              _pulseRing((controller.value + 0.5) % 1.0),
+              Container(
+                width: 96,
+                height: 96,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withValues(alpha: 0.22),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 20, spreadRadius: 2),
+                  ],
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(_thumbPadding),
-                child: Transform.translate(
-                  offset: Offset(_dragX, 0),
-                  child: GestureDetector(
-                    onPanUpdate: _onPanUpdate,
-                    onPanEnd: _onPanEnd,
-                    child: Container(
-                      width: _thumbSize,
-                      height: _thumbSize,
-                      decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
-                      child: widget.busy || _completed
-                          ? const Padding(
-                              padding: EdgeInsets.all(14),
-                              child: CircularProgressIndicator(strokeWidth: 2.4, color: AppColors.danger),
-                            )
-                          : const Icon(Icons.arrow_forward_rounded, color: AppColors.danger),
-                    ),
-                  ),
-                ),
+                child: const Icon(Icons.alarm_rounded, color: Colors.white, size: 46),
               ),
             ],
-          ),
-        );
-      },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _pulseRing(double t) {
+    final size = 96 + t * 64;
+    return Opacity(
+      opacity: (1 - t).clamp(0.0, 1.0) * 0.5,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2)),
+      ),
     );
   }
 }

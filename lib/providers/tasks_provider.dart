@@ -61,6 +61,34 @@ Future<void> updateTaskStatus(String taskId, String status) async {
   await ApiClient.instance.dio.put('/tasks/$taskId', data: {'status': status});
 }
 
+/// Full task-details edit -- PUT /api/v1/tasks/:id with whichever of
+/// name/assigneeId/priority/startDate/dueDate the Edit sheet collected.
+/// Same route/fields the web app's TaskDetailModal uses, so the server's
+/// existing permission rules apply identically on mobile: SuperAdmin/
+/// Teams-Full-Access can always edit, everyone else only within 5 minutes
+/// of the task being assigned (see isPastEditGracePeriod/
+/// canBypassTaskLocks in task.controller.js) -- past that window this
+/// throws a 403 with a ready-to-show message, which the caller is
+/// expected to surface as-is rather than a generic error.
+Future<void> updateTaskDetails(
+  String taskId, {
+  required String name,
+  String? assigneeId,
+  String? priority,
+  DateTime? startDate,
+  DateTime? dueDate,
+  DateTime? reminderAt,
+}) async {
+  await ApiClient.instance.dio.put('/tasks/$taskId', data: {
+    'name': name,
+    'assigneeId': assigneeId,
+    'priority': priority,
+    'startDate': startDate?.toUtc().toIso8601String(),
+    'dueDate': dueDate?.toUtc().toIso8601String(),
+    'reminderAt': reminderAt?.toUtc().toIso8601String(),
+  });
+}
+
 /// Direct reports' tasks overdue 24h+ and still incomplete -- GET
 /// /api/v1/tasks/team/overdue-escalations. Returns an empty list for
 /// anyone with no direct reports (the server checks, not this app), so
@@ -123,6 +151,82 @@ Future<void> approveTaskCompletion(String taskId) async {
 /// optional reason attached (see rejectCompletion in task.controller.js).
 Future<void> rejectTaskCompletion(String taskId, {String? reason}) async {
   await ApiClient.instance.dio.post('/tasks/$taskId/reject-completion', data: {
+    if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+  });
+}
+
+/// The assignee-side mirror of fetchPendingApprovals above -- every task
+/// the logged-in person is the ASSIGNEE of that they've already marked
+/// complete and is still sitting on completionApproval.status "PENDING"
+/// (still waiting) or "REJECTED" (sent back, with a reason). GET
+/// /api/v1/tasks/my-submitted-approvals -- same "Awaiting Approval" name
+/// the web app's own button uses (MySubmittedApprovalsModal.jsx), kept
+/// identical here so the two apps talk about this the same way.
+Future<List<Map<String, dynamic>>> fetchMySubmittedApprovals() async {
+  try {
+    final res = await ApiClient.instance.dio.get('/tasks/my-submitted-approvals');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  } on DioException catch (e) {
+    // See myTasksProvider's own catch above -- same reasoning.
+    if (e.response?.statusCode == 403) return [];
+    rethrow;
+  }
+}
+
+/// Riverpod wrapper around fetchMySubmittedApprovals above, for the
+/// dedicated "Awaiting Approval" screen.
+final mySubmittedApprovalsProvider =
+    FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) {
+  return fetchMySubmittedApprovals();
+});
+
+/// Every task with a pending 5-minute-lock override request (someone who
+/// isn't Full Access asking to edit/delete a task past its normal edit
+/// window) -- GET /api/v1/tasks/lock-override-requests. Server-side this
+/// returns an empty list for anyone who isn't Full Access rather than
+/// 403ing (see listLockOverrideRequests in task.controller.js), so it's
+/// safe to call unconditionally, same as fetchTeamOverdueEscalations above.
+///
+/// Deliberately kept separate from fetchPendingApprovals/
+/// pendingApprovalsProvider above rather than merged into it -- that one
+/// is also watched by TasksScreen's DELEGATED group, which expects every
+/// item to have completion-approval shape (completionApproval, etc); a
+/// lock-override item has a different shape (overrideType, reason,
+/// requestedByName) entirely. PendingApprovalsScreen merges the two lists
+/// itself for display, matching the web app's PendingApprovalsModal.jsx
+/// (usePendingApprovals), which does the same two-calls-merged-in-the-
+/// component pattern rather than one combined endpoint.
+Future<List<Map<String, dynamic>>> fetchLockOverrideRequests() async {
+  try {
+    final res = await ApiClient.instance.dio.get('/tasks/lock-override-requests');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  } on DioException catch (e) {
+    // See myTasksProvider's own catch above -- same reasoning.
+    if (e.response?.statusCode == 403) return [];
+    rethrow;
+  }
+}
+
+final lockOverrideRequestsProvider =
+    FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) {
+  return fetchLockOverrideRequests();
+});
+
+/// POST /api/v1/tasks/:id/lock-override/approve -- any Full Access person
+/// can call this (server enforces via canBypassTaskLocks), not just the
+/// task's own creator/delegator. Applies the requester's saved patch (EDIT)
+/// or deletes the task (DELETE); see approveLockOverride in
+/// task.controller.js.
+Future<void> approveLockOverride(String taskId) async {
+  await ApiClient.instance.dio.post('/tasks/$taskId/lock-override/approve');
+}
+
+/// POST /api/v1/tasks/:id/lock-override/reject -- leaves the task
+/// completely untouched, only the request's own status changes.
+Future<void> rejectLockOverride(String taskId, {String? reason}) async {
+  await ApiClient.instance.dio.post('/tasks/$taskId/lock-override/reject', data: {
     if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
   });
 }
@@ -238,6 +342,7 @@ Future<void> createTaskInSpace(
   String? assigneeId,
   DateTime? startDate,
   DateTime? dueDate,
+  DateTime? reminderAt,
   String? priority,
 }) async {
   // .toUtc() before serializing is load-bearing: DateTime(...) built from
@@ -255,6 +360,7 @@ Future<void> createTaskInSpace(
     if (assigneeId != null) 'assigneeId': assigneeId,
     if (startDate != null) 'startDate': startDate.toUtc().toIso8601String(),
     if (dueDate != null) 'dueDate': dueDate.toUtc().toIso8601String(),
+    if (reminderAt != null) 'reminderAt': reminderAt.toUtc().toIso8601String(),
     if (priority != null) 'priority': priority,
   });
 }

@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 import 'api_client.dart';
+import 'notification_schedule.dart';
 
 const _askedBatteryOptKey = 'asked_battery_opt_once';
 const _askedFullScreenIntentKey = 'asked_full_screen_intent_once';
@@ -334,7 +335,7 @@ class NotificationService {
       final alarmId = await _alarmKit
           .scheduleOneShotAlarm(
             timestamp: when.millisecondsSinceEpoch.toDouble(),
-            label: 'Overdue: $taskName',
+            label: 'Reminder: $taskName',
             // Only the single native Stop button fits in AlarmKit's alert (see
             // requestAlarmKitAuthorizationOnce's own doc comment for the full
             // reasoning) -- it just silences the ring, it does NOT mark the
@@ -367,16 +368,14 @@ class NotificationService {
     if (alarmId == null) return;
     try {
       // A timeout, not just try/catch, is load-bearing here: the Alarm
-      // screen's Complete/End buttons await completeOverdueTask ->
-      // cancelOverdueAlarm -> this, then navigate away once it returns
-      // (see alarm_screen.dart's _complete/_end). A native AlarmKit call
-      // that throws is already handled by catch below, but one that
-      // simply never completes -- e.g. cancelling an alarm that already
-      // auto-stopped itself the moment the person tapped its native
-      // alert, which some AlarmKit builds appear to hang on -- would
-      // otherwise leave that await pending forever, stalling the whole
-      // chain before it ever reaches context.go('/home') even though the
-      // task was already marked complete on the server a step earlier.
+      // screen's End button awaits cancelOverdueAlarm -> this, then
+      // navigates away once it returns (see alarm_screen.dart's _end). A
+      // native AlarmKit call that throws is already handled by catch
+      // below, but one that simply never completes -- e.g. cancelling an
+      // alarm that already auto-stopped itself the moment the person
+      // tapped its native alert, which some AlarmKit builds appear to
+      // hang on -- would otherwise leave that await pending forever,
+      // stalling the whole chain before it ever reaches context.go('/home').
       await _alarmKit.cancelAlarm(alarmId: alarmId).timeout(const Duration(seconds: 3));
     } catch (_) {}
     await prefs.remove(_alarmKitTaskPrefsKey(alarmId));
@@ -390,6 +389,49 @@ class NotificationService {
     importance: Importance.high,
     priority: Priority.high,
   );
+
+  // The morning/end-of-day digest -- its own channel (rather than reusing
+  // _channel) so muting the digest specifically (settings_provider.dart's
+  // dailyDigest toggle) doesn't also silence due-date reminders, and vice
+  // versa. Default importance (not high/max) since this is a scheduled
+  // summary, not something time-sensitive to act on immediately.
+  static const _digestChannel = AndroidNotificationDetails(
+    'hqepl_daily_digest',
+    'Daily Digest',
+    channelDescription: "A morning task summary and an end-of-day wrap-up, sent at your company's office start/end times",
+    importance: Importance.defaultImportance,
+    priority: Priority.defaultPriority,
+  );
+
+  // Fixed ids (rather than one derived from a task id) since there's only
+  // ever one morning digest and one evening digest per device -- a second
+  // call with the same id on the same day just replaces the first rather
+  // than stacking a duplicate, which background_watcher_service.dart's own
+  // once-per-business-day dedupe already prevents from happening anyway.
+  static const _morningDigestId = 90001;
+  static const _eveningDigestId = 90002;
+
+  Future<void> showMorningDigest({required String title, required String body}) async {
+    try {
+      await _plugin.show(
+        _morningDigestId,
+        title,
+        body,
+        const NotificationDetails(android: _digestChannel, iOS: DarwinNotificationDetails()),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> showEveningDigest({required String title, required String body}) async {
+    try {
+      await _plugin.show(
+        _eveningDigestId,
+        title,
+        body,
+        const NotificationDetails(android: _digestChannel, iOS: DarwinNotificationDetails()),
+      );
+    } catch (_) {}
+  }
 
   // New task assignments and any change to an existing task -- see
   // task_update_tracker.dart for the detection logic this backs. Separate
@@ -431,11 +473,13 @@ class NotificationService {
   // Android treat this like a real alarm clock: launches the app over
   // the lock screen (see MainActivity's showWhenLocked/turnScreenOn in
   // AndroidManifest.xml) instead of just posting a heads-up banner.
-  // Still carries Snooze/Complete actions too, for whenever it's seen as
-  // a normal notification instead (screen already on, tray pull-down).
+  // Still carries Snooze/End actions too, for whenever it's seen as a
+  // normal notification instead (screen already on, tray pull-down) --
+  // deliberately the same two actions as the full-screen Alarm screen
+  // itself, nothing more.
   static const _overdueActions = [
     AndroidNotificationAction('snooze_action', 'Snooze', showsUserInterface: false, cancelNotification: true),
-    AndroidNotificationAction('complete_action', 'Complete', showsUserInterface: false, cancelNotification: true),
+    AndroidNotificationAction('end_action', 'End', showsUserInterface: false, cancelNotification: true),
   ];
 
   // '_v3' suffix is deliberate: Android notification channels are immutable
@@ -543,8 +587,8 @@ class NotificationService {
     try {
       await _plugin.show(
         _alarmId(taskId),
-        'Overdue: $taskName',
-        spaceName.isNotEmpty ? 'Space: $spaceName · tap Complete or Snooze' : 'Tap Complete or Snooze',
+        'Reminder: $taskName',
+        spaceName.isNotEmpty ? 'Space: $spaceName · tap Snooze or End' : 'Tap Snooze or End',
         const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
         payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
       );
@@ -580,8 +624,8 @@ class NotificationService {
       await _plugin
           .zonedSchedule(
             _alarmId(taskId),
-            'Overdue: $taskName',
-            spaceName.isNotEmpty ? 'Space: $spaceName · tap Complete or Snooze' : 'Tap Complete or Snooze',
+            'Reminder: $taskName',
+            spaceName.isNotEmpty ? 'Space: $spaceName · tap Snooze or End' : 'Tap Snooze or End',
             fireAt,
             const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
             // alarmClock (AlarmManager.setAlarmClock) is the same, most-privileged
@@ -664,35 +708,81 @@ class NotificationService {
     } catch (_) {}
   }
 
-  // Best-effort: a caller like the Alarm screen's Complete/End actions
-  // awaits this right after already marking the task complete/dismissed
-  // server-side -- if the plugin call itself throws (platform-channel
-  // hiccup, OEM quirk), that must never block the caller from proceeding
-  // to navigate away. Worst case a stale scheduled notification lingers,
-  // which is harmless compared to leaving the person stuck on this screen.
+  // Best-effort: a caller like the Alarm screen's End button awaits this
+  // right after already dismissing the alarm client-side -- if the plugin
+  // call itself throws (platform-channel hiccup, OEM quirk), that must
+  // never block the caller from proceeding to navigate away. Worst case a
+  // stale scheduled notification lingers, which is harmless compared to
+  // leaving the person stuck on this screen.
   Future<void> cancelOverdueAlarm(String taskId) async {
     try {
       await _plugin.cancel(_alarmId(taskId));
     } catch (_) {}
     await _cancelAlarmKitAlarm(taskId);
+    // Writes taskId into the shared "already alerted" record DIRECTLY,
+    // right here, rather than only relying on notifications_provider.dart/
+    // background_watcher_service.dart's own polling passes to eventually
+    // record it (each only persists this at the END of its own async
+    // pass). Without this, a foreground poll and a background poll firing
+    // within moments of each other could each independently see "not yet
+    // alerted" before either had written its result, both fire the alarm
+    // again, and the very next poll after End (the background watcher's
+    // next once-a-minute tick, or Home simply being reopened) could still
+    // see it as unhandled and re-ring it -- which is what "I pressed End
+    // and it came right back" looks like from the outside. Ending an
+    // alarm should be an immediate, unconditional guarantee that THIS
+    // device never rings it again, not something left to a race with
+    // whichever poll happens to run next.
+    try {
+      await _markAlerted(taskId).timeout(const Duration(seconds: 3));
+    } catch (_) {}
+    // A real (non-test/placeholder) task id -- also tell the server this
+    // reminder is done, so it can never come back as a stale catch-up
+    // fire on a DIFFERENT device/after a reinstall, where the local
+    // record above doesn't survive. See PUT /tasks/:id/reminder's own
+    // doc comment for exactly why this matters: without it, the ONLY
+    // thing stopping this alarm from ringing again was this device's
+    // local "already alerted" bookkeeping (SharedPreferences), which a
+    // fresh app install/reinstall wipes clean -- reviving an already-
+    // dismissed alarm the moment someone logs back in and the background
+    // watcher's next poll sees reminderAt still sitting in the past.
+    await _syncReminderToServer(taskId, null);
+  }
+
+  Future<void> _markAlerted(String taskId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet()..add(taskId);
+    await prefs.setStringList(_alertedOverdueIdsKey, alertedIds.toList());
   }
 
   Future<void> cancel(int id) => _plugin.cancel(id);
   Future<void> cancelAll() => _plugin.cancelAll();
+
+  static final _objectIdRe = RegExp(r'^[0-9a-fA-F]{24}$');
+
+  // Best-effort, fire-and-forget-with-a-timeout PUT to the mobile-only
+  // reminder endpoint -- deliberately swallows every failure (no network,
+  // logged out, server unreachable) since this is a background-sync nice-
+  // to-have, never something that should block a Snooze/End button or
+  // surface an error the person can't act on from this screen. Skips the
+  // Settings screen's synthetic "test_alarm" id (see _sendTestAlarm),
+  // which was never a real task and would just 404.
+  Future<void> _syncReminderToServer(String taskId, DateTime? reminderAt) async {
+    if (!_objectIdRe.hasMatch(taskId)) return;
+    try {
+      await ApiClient.instance.dio.put(
+        '/tasks/$taskId/reminder',
+        data: {'reminderAt': reminderAt?.toUtc().toIso8601String()},
+      ).timeout(const Duration(seconds: 8));
+    } catch (_) {}
+  }
 
   /// Checked once at startup (see main.dart) -- was the app cold-started
   /// by the person tapping/launching the overdue alarm notification
   /// (including via its full-screen intent)? If so its payload is used
   /// to route straight to the Alarm screen instead of Home.
   Future<NotificationAppLaunchDetails?> getLaunchDetails() => _plugin.getNotificationAppLaunchDetails();
-
-  /// Same "Complete" action the notification's button performs -- exposed
-  /// so the full-screen Alarm screen's own Complete button can call the
-  /// identical logic without going through a fake NotificationResponse.
-  Future<void> completeOverdueTask(String taskId) async {
-    await _completeTaskDirect(taskId);
-    await cancelOverdueAlarm(taskId);
-  }
 
   /// Clears [taskId] out of the "already alerted" list and records when
   /// it's allowed to ring again -- see _alertedOverdueIdsKey/
@@ -727,7 +817,14 @@ class NotificationService {
     required String spaceName,
     Duration duration = const Duration(minutes: 5),
   }) async {
-    final until = DateTime.now().add(duration);
+    // Deferred to the next allowed instant if the plain "now + duration"
+    // snooze would land on a holiday, a weekly off day, or outside office
+    // hours -- same reasoning as scheduleOverdueAlarmAt's own callers in
+    // notifications_provider.dart. Computed once here and reused below so
+    // the snooze bookkeeping, the server's reminderAt, and the actual
+    // scheduled alarm all agree on the same instant.
+    final schedule = await fetchNotificationSchedule();
+    final until = schedule.resolveNextAllowedInstant(DateTime.now().add(duration));
 
     // Best-effort, same reasoning as _cancelAlarmKitAlarm's own timeout
     // above: this is bookkeeping only (see _alertedOverdueIdsKey/
@@ -740,6 +837,14 @@ class NotificationService {
     try {
       await _markSnoozed(taskId, until).timeout(const Duration(seconds: 3));
     } catch (_) {}
+
+    // Keeps the server's reminderAt in step with the new snooze time --
+    // without this, it stays at the ORIGINAL (now past) value, so a
+    // device that loses its local "already alerted"/snooze bookkeeping
+    // before the snooze window ends (see cancelOverdueAlarm's own doc
+    // comment on why that can happen) would treat it as overdue for
+    // catch-up firing again immediately, ignoring the snooze entirely.
+    await _syncReminderToServer(taskId, until);
 
     await scheduleOverdueAlarmAt(
       taskId: taskId,
@@ -792,8 +897,8 @@ Future<void> _handleAlarmAction(NotificationResponse response) async {
     case 'snooze_action':
       await NotificationService.instance.snoozeOverdueAlarm(taskId: taskId, taskName: taskName, spaceName: spaceName);
       break;
-    case 'complete_action':
-      await NotificationService.instance.completeOverdueTask(taskId);
+    case 'end_action':
+      await NotificationService.instance.cancelOverdueAlarm(taskId);
       break;
     default:
       // Plain tap on the notification body, or the full-screen intent
@@ -806,20 +911,5 @@ Future<void> _handleAlarmAction(NotificationResponse response) async {
       // wouldn't see.
       pendingAlarmNotifier.value = data;
       break;
-  }
-}
-
-/// PUT /tasks/:id status=COMPLETE via the app's own ApiClient -- its
-/// request interceptor already attaches the stored auth token from
-/// secure storage, so this needs no separate token handling even when
-/// running in the background isolate above.
-Future<void> _completeTaskDirect(String taskId) async {
-  try {
-    await ApiClient.instance.dio.put('/tasks/$taskId', data: {'status': 'COMPLETE'});
-  } catch (_) {
-    // Best-effort: if this fails (offline, expired token), the alarm's
-    // already been dismissed client-side and there's no UI here to
-    // surface an error to -- the task will just still show as overdue
-    // next time the app's own task list is fetched.
   }
 }

@@ -1,7 +1,7 @@
 name: hqepl_mobile
 description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
 publish_to: 'none'
-version: 1.0.0+37
+version: 1.0.0+40
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -80,6 +80,10 @@ dependencies:
   # Opens a non-image task attachment (PDF, doc, etc.) in whatever app the
   # phone already has for it, since this app has no in-app document viewer.
   url_launcher: ^6.3.1
+  # Realtime task events (task:created/task:updated) from the same
+  # Socket.IO server the web app already connects to (server/config/
+  # socket.js, client/src/lib/socket.js) -- see socket_service.dart.
+  socket_io_client: ^2.0.3+1
 
 dev_dependencies:
   flutter_test:

@@ -60,6 +60,9 @@ class StatusStyle {
       case 'delegated': // completionApproval.status === "PENDING" (Task.js) --
       // the assignee marked it done, waiting on the delegator's decision.
         return const StatusStyle(AppColors.warning, AppColors.warningSoft);
+      case 'rejected': // completionApproval.status === "REJECTED" -- sent
+      // back to the assignee; needs their attention, so styled like overdue.
+        return const StatusStyle(AppColors.danger, AppColors.dangerSoft);
       default:
         return const StatusStyle(AppColors.inkMuted, AppColors.neutralSoft);
     }

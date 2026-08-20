@@ -10,6 +10,12 @@ class TaskChangeResult {
   final String spaceName;
   final bool isNew;
   final String? activityMessage;
+  // Who this task is assigned to -- lets a caller split "my own task
+  // changed" from "a team member's task changed" (see
+  // notifications_provider.dart/background_watcher_service.dart's
+  // separate myTask*/teamTask* toggles), since myTasksProvider's task
+  // list already mixes both together for a manager/senior.
+  final String? assigneeId;
 
   TaskChangeResult({
     required this.taskId,
@@ -17,6 +23,7 @@ class TaskChangeResult {
     required this.spaceName,
     required this.isNew,
     this.activityMessage,
+    this.assigneeId,
   });
 }
 
@@ -62,6 +69,8 @@ Future<List<TaskChangeResult>> detectTaskChanges(
     final title = (t['title'] ?? t['name'] ?? 'Untitled task').toString();
     final id = (t['_id'] ?? t['id'] ?? title).toString();
     final spaceName = (t['spaceName'] ?? '').toString();
+    final assigneeRaw = t['assigneeId'];
+    final assigneeId = (assigneeRaw is Map ? assigneeRaw['_id'] : assigneeRaw)?.toString();
 
     final isSelfMade = currentUserId != null && _latestActivityActorId(t) == currentUserId;
 
@@ -75,6 +84,7 @@ Future<List<TaskChangeResult>> detectTaskChanges(
           spaceName: spaceName,
           isNew: true,
           activityMessage: _latestActivityMessage(t),
+          assigneeId: assigneeId,
         ));
       }
       continue;
@@ -88,6 +98,7 @@ Future<List<TaskChangeResult>> detectTaskChanges(
           spaceName: spaceName,
           isNew: false,
           activityMessage: _latestActivityMessage(t),
+          assigneeId: assigneeId,
         ));
       }
     }

@@ -27,6 +27,20 @@ class _TaskAttachmentsSectionState extends ConsumerState<TaskAttachmentsSection>
     super.initState();
     attachmentRecoveredNotifier.addListener(_onAttachmentRecovered);
     attachmentUploadingNotifier.addListener(_onRecoveryUploadingChanged);
+    // Catches a recovery that already finished (see
+    // pending_attachment_service.dart) before this panel existed to hear
+    // it. On phones where the Activity ISN'T torn down mid-pick (i.e. most
+    // non-Vivo devices), the recovered upload can complete and flip
+    // attachmentRecoveredNotifier within the same frame the router
+    // redirects back to a freshly-built TaskDetailScreen -- a
+    // ValueNotifier doesn't replay its value to a listener that
+    // subscribes after the fact, so without this the very first attach on
+    // a task silently never refreshed the panel (the file WAS uploaded,
+    // the screen just never learned to show it) until a second attempt on
+    // an already-mounted panel picked up a later change normally.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _onAttachmentRecovered();
+    });
   }
 
   @override
@@ -85,17 +99,41 @@ class _TaskAttachmentsSectionState extends ConsumerState<TaskAttachmentsSection>
   // destroys this Activity while the picker is in the foreground -- see
   // pending_attachment_service.dart for why that happens and why the
   // target can't just be held in this widget's state.
+  // A native "handle the Activity handoff ourselves" capture (mirroring
+  // _chooseDocument's native document picker below) was tried here and
+  // reverted: its success/failure both had to be reported through
+  // recoverPendingUpload() in pending_attachment_service.dart, which only
+  // ever runs from two triggers in main.dart -- app resume
+  // (didChangeAppLifecycleState) or an auth-state transition. On at least
+  // one Android phone tested, neither trigger fired reliably after
+  // returning from the camera, which meant NEITHER an upload NOR an error
+  // message ever appeared -- the capture looked like it vanished into
+  // nothing. image_picker's own pickImage() below has no such dependency
+  // in the common case: the Future it returns resolves directly the
+  // moment onActivityResult fires, with no app-lifecycle signal in the
+  // loop at all, which is why this is the primary path on every Android
+  // phone again despite the (real, but comparatively rare) Activity-
+  // teardown failure mode retrieveLostData() below exists to cover.
   Future<void> _takePhoto() async {
     try {
       await PendingAttachmentService.instance.setPendingTarget(widget.taskId);
+      // Set before the await and cleared right after it settles (success,
+      // null, or throw) -- this is what tells recoverPendingUpload() in
+      // main.dart's resume handler to leave this pick alone instead of
+      // racing retrieveLostData() against it. See cameraPickInFlight's own
+      // doc comment for the full failure mode this fixes.
+      PendingAttachmentService.instance.cameraPickInFlight = true;
       final picked = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 85);
+      PendingAttachmentService.instance.cameraPickInFlight = false;
       // Reached only when the Activity survived the trip to the camera; if
-      // it didn't, this code no longer exists and the recovery path picks
-      // the shot up instead. Either way the target is cleared so only one
-      // of the two ever uploads.
+      // it didn't, pending_attachment_service.dart's own
+      // retrieveLostData()-based recovery picks the shot up instead once
+      // the app resumes. Either way the target is cleared so only one of
+      // the two ever uploads.
       await PendingAttachmentService.instance.clearPendingTarget();
       if (picked != null) await _upload(picked.path);
     } catch (e) {
+      PendingAttachmentService.instance.cameraPickInFlight = false;
       await PendingAttachmentService.instance.clearPendingTarget();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

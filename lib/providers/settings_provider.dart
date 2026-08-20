@@ -10,6 +10,11 @@ class NotificationSettings {
   final bool masterEnabled;
   final bool taskDueReminders;
   final bool ticketUpdates;
+  // A morning "today's tasks" push and an end-of-day "how today went"
+  // push, sent by background_watcher_service.dart's
+  // _checkDailyDigestOnce at the company's configured office start/end
+  // times (see notification_schedule.dart) -- Android-only, same as the
+  // rest of that file's watcher subsystem.
   final bool dailyDigest;
   final int reminderHoursBefore; // how long before a due date to remind
   // Split out from taskDueReminders (which only covers the due-date/
@@ -26,17 +31,39 @@ class NotificationSettings {
   final bool taskUpdates;
   final bool approvalAlerts;
   final bool teamEscalations;
+  // Dedicated group toggle just for "My Task" push notifications --
+  // new-assignment and task-update pushes (taskAssigned/taskUpdates above)
+  // only fire while this is also on, on top of their own individual
+  // toggles. Separate from taskDueReminders (the due-date/alarm side) and
+  // from approvalAlerts/teamEscalations (about other people's actions on
+  // your delegated tasks or reports), since those aren't "my task" pushes
+  // in the same sense.
+  final bool myTaskNotifications;
+  // The team-member mirror of taskAssigned/taskUpdates/myTaskNotifications
+  // above -- myTasksProvider ("/tasks/mine/all") already mixes a manager/
+  // senior's own tasks together with every subordinate's, but until now
+  // there was no way to hear about a REPORT's task being assigned/updated
+  // without also turning on notifications for your own tasks (or vice
+  // versa). teamEscalations above stays its own separate thing -- it's
+  // specifically the 24h+-overdue alert, not general activity.
+  final bool teamTaskNotifications;
+  final bool teamTaskAssigned;
+  final bool teamTaskUpdates;
 
   const NotificationSettings({
     this.masterEnabled = true,
     this.taskDueReminders = true,
     this.ticketUpdates = true,
-    this.dailyDigest = false,
+    this.dailyDigest = true,
     this.reminderHoursBefore = 3,
     this.taskAssigned = true,
     this.taskUpdates = true,
     this.approvalAlerts = true,
     this.teamEscalations = true,
+    this.myTaskNotifications = true,
+    this.teamTaskNotifications = true,
+    this.teamTaskAssigned = true,
+    this.teamTaskUpdates = true,
   });
 
   NotificationSettings copyWith({
@@ -49,6 +76,10 @@ class NotificationSettings {
     bool? taskUpdates,
     bool? approvalAlerts,
     bool? teamEscalations,
+    bool? myTaskNotifications,
+    bool? teamTaskNotifications,
+    bool? teamTaskAssigned,
+    bool? teamTaskUpdates,
   }) {
     return NotificationSettings(
       masterEnabled: masterEnabled ?? this.masterEnabled,
@@ -60,6 +91,10 @@ class NotificationSettings {
       taskUpdates: taskUpdates ?? this.taskUpdates,
       approvalAlerts: approvalAlerts ?? this.approvalAlerts,
       teamEscalations: teamEscalations ?? this.teamEscalations,
+      myTaskNotifications: myTaskNotifications ?? this.myTaskNotifications,
+      teamTaskNotifications: teamTaskNotifications ?? this.teamTaskNotifications,
+      teamTaskAssigned: teamTaskAssigned ?? this.teamTaskAssigned,
+      teamTaskUpdates: teamTaskUpdates ?? this.teamTaskUpdates,
     );
   }
 
@@ -73,18 +108,26 @@ class NotificationSettings {
         'taskUpdates': taskUpdates,
         'approvalAlerts': approvalAlerts,
         'teamEscalations': teamEscalations,
+        'myTaskNotifications': myTaskNotifications,
+        'teamTaskNotifications': teamTaskNotifications,
+        'teamTaskAssigned': teamTaskAssigned,
+        'teamTaskUpdates': teamTaskUpdates,
       };
 
   factory NotificationSettings.fromPrefs(SharedPreferences prefs) => NotificationSettings(
         masterEnabled: prefs.getBool('notif_master') ?? true,
         taskDueReminders: prefs.getBool('notif_task_due') ?? true,
         ticketUpdates: prefs.getBool('notif_ticket_updates') ?? true,
-        dailyDigest: prefs.getBool('notif_daily_digest') ?? false,
+        dailyDigest: prefs.getBool('notif_daily_digest') ?? true,
         reminderHoursBefore: prefs.getInt('notif_reminder_hours') ?? 3,
         taskAssigned: prefs.getBool('notif_task_assigned') ?? true,
         taskUpdates: prefs.getBool('notif_task_updates') ?? true,
         approvalAlerts: prefs.getBool('notif_approval_alerts') ?? true,
         teamEscalations: prefs.getBool('notif_team_escalations') ?? true,
+        myTaskNotifications: prefs.getBool('notif_my_task') ?? true,
+        teamTaskNotifications: prefs.getBool('notif_team_task') ?? true,
+        teamTaskAssigned: prefs.getBool('notif_team_task_assigned') ?? true,
+        teamTaskUpdates: prefs.getBool('notif_team_task_updates') ?? true,
       );
 }
 
@@ -109,6 +152,10 @@ class SettingsNotifier extends StateNotifier<NotificationSettings> {
     await prefs.setBool('notif_task_updates', s.taskUpdates);
     await prefs.setBool('notif_approval_alerts', s.approvalAlerts);
     await prefs.setBool('notif_team_escalations', s.teamEscalations);
+    await prefs.setBool('notif_my_task', s.myTaskNotifications);
+    await prefs.setBool('notif_team_task', s.teamTaskNotifications);
+    await prefs.setBool('notif_team_task_assigned', s.teamTaskAssigned);
+    await prefs.setBool('notif_team_task_updates', s.teamTaskUpdates);
   }
 
   void update(NotificationSettings Function(NotificationSettings) fn) {

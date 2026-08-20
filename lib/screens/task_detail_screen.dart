@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../core/theme.dart';
+import '../core/notification_service.dart';
 import '../core/pending_attachment_service.dart';
 import '../providers/auth_provider.dart';
 import '../providers/tasks_provider.dart';
@@ -11,6 +12,7 @@ import '../widgets/task_checklist_section.dart';
 import '../widgets/task_subtasks_section.dart';
 import '../widgets/task_attachments_section.dart';
 import '../widgets/task_comments_section.dart';
+import '../widgets/edit_task_sheet.dart';
 
 const _statuses = ['TO DO', 'IN PROGRESS', 'COMPLETE'];
 
@@ -121,6 +123,17 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
     setState(() => _updating = true);
     try {
       await updateTaskStatus(widget.taskId, status);
+      if (status == 'COMPLETE') {
+        // A snoozed/scheduled overdue alarm is a standalone OS-level
+        // trigger (AndroidAlarmManager/zonedSchedule) independent of the
+        // task's own status -- finishing the task before a snooze window
+        // ends previously left that alarm armed, so it still rang at the
+        // original snooze time for a task that was already done. Best-
+        // effort: a task completed from here was never overdue to begin
+        // with in the common case, so there's usually nothing scheduled
+        // to cancel.
+        await NotificationService.instance.cancelOverdueAlarm(widget.taskId);
+      }
       ref.invalidate(taskDetailProvider(widget.taskId));
       ref.invalidate(myTasksProvider);
       ref.invalidate(dashboardStatsProvider);
@@ -249,8 +262,11 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
           final priority = t['priority']?.toString();
           final description = (t['description'] ?? '').toString();
           final dateFmt = DateFormat('dd/MM/yyyy');
+          final dateTimeFmt = DateFormat('dd/MM/yyyy, hh:mm a');
           final startDate = _parseDate(t['startDate']);
           final dueDate = _parseDate(t['dueDate']);
+          final reminderAt = _parseDate(t['reminderAt']);
+          final completedAt = _parseDate(t['completedAt']);
           final spaceName = t['spaceName']?.toString();
           final folderName = t['folderName']?.toString();
 
@@ -281,6 +297,17 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
                     child: Text(t['name']?.toString() ?? 'Untitled task', style: Theme.of(context).textTheme.headlineSmall),
                   ),
                   const SizedBox(width: Gap.sm),
+                  // No client-side "can I edit" check here on purpose --
+                  // the sheet always opens, and the server's own 5-minute/
+                  // Full-Access rule (see updateTaskDetails in
+                  // tasks_provider.dart) decides on save, same as the web
+                  // app's own edit button does no pre-check either.
+                  IconButton(
+                    icon: const Icon(Icons.edit_outlined, size: 20),
+                    tooltip: 'Edit task',
+                    onPressed: () => showEditTaskSheet(context, ref, t),
+                    visualDensity: VisualDensity.compact,
+                  ),
                   StatusPill(status: pendingApproval ? 'DELEGATED' : status),
                 ],
               ),
@@ -405,6 +432,17 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
                 label: 'Due date',
                 value: dueDate != null ? dateFmt.format(dueDate) : 'Not set',
               ),
+              _DetailRow(
+                icon: Icons.alarm_rounded,
+                label: 'Reminder (alarm)',
+                value: reminderAt != null ? dateTimeFmt.format(reminderAt) : 'Not set',
+              ),
+              if (completedAt != null)
+                _DetailRow(
+                  icon: Icons.task_alt_rounded,
+                  label: 'Completed on',
+                  value: dateTimeFmt.format(completedAt.toLocal()),
+                ),
 
               if (description.trim().isNotEmpty) ...[
                 const SizedBox(height: Gap.lg),

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../core/notification_schedule.dart';
 import '../core/notification_service.dart';
 import '../core/task_update_tracker.dart';
 import '../models/notification_item.dart';
@@ -100,29 +101,86 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
 
   final now = DateTime.now();
   final tasks = await ref.watch(myTasksProvider.future);
+  // The company-wide holidays/weekly-off/office-hours window (see
+  // notification_schedule.dart) -- fetched once per feed build and reused
+  // below for every OS-level notification this function might fire
+  // (including the full-screen alarm), same rule email.service.js
+  // already applies server-side to task emails. Feed LIST items further
+  // down (the in-app "Overdue"/"Due soon" entries) are deliberately NOT
+  // gated by this -- it only suppresses actual push/alarm notifications,
+  // not what shows when the person opens the app themselves.
+  final schedule = await fetchNotificationSchedule();
+  final withinWindow = schedule.isWithinWindow(now);
 
   // New task assignments and any edit to an existing task -- independent
   // of taskDueReminders below, which only governs the due-date-specific
   // reminder/overdue-alarm logic. See task_update_tracker.dart: the same
   // detection function background_watcher_service.dart's polling isolate
   // calls, sharing one persisted record so a change caught by whichever
-  // path runs first isn't re-announced by the other.
+  // path runs first isn't re-announced by the other. Deliberately still
+  // calls detectTaskChanges even while a toggle below is off, rather than
+  // skipping this whole block -- that call is what advances its own
+  // persisted "already seen" snapshot, so skipping it entirely while
+  // muted would let changes pile up and all flood in at once the moment
+  // notifications are turned back on (a deliberate "drop forever while
+  // muted" design).
+  //
+  // Outside the notification window is different: those changes SHOULD
+  // still be reported, just later -- so detectTaskChanges is skipped
+  // ENTIRELY in that case (not called at all, no items to iterate),
+  // leaving its snapshot un-advanced so the next feed build back inside
+  // the window reports them instead of having silently marked them seen.
+  // Safe to gate on a single combined condition here (rather than one
+  // check per category) because the window itself doesn't vary between
+  // "mine" and "a team member's" within the same poll -- only skipped
+  // when NEITHER category would even want to fire, so a muted-but-not-
+  // suppressed category still gets its own "drop forever" treatment
+  // below exactly as before.
   final currentUserId = ref.watch(authProvider).user?.id;
-  for (final change in await detectTaskChanges(tasks, currentUserId: currentUserId)) {
-    // "New task assigned to you" and "an existing task changed" are
-    // separately controllable (see settings_provider.dart's own doc
-    // comment on taskAssigned/taskUpdates) -- a fresh assignment is
-    // usually worth knowing about even for someone who's muted the
-    // noisier "every edit" stream, or vice versa.
-    if (change.isNew ? !settings.taskAssigned : !settings.taskUpdates) continue;
-    final body = change.activityMessage ??
-        (change.isNew ? 'Assigned to you' : 'Task updated') +
-            (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
-    await NotificationService.instance.showTaskUpdateNotification(
-      taskId: change.taskId,
-      title: change.isNew ? 'New task: ${change.title}' : change.title,
-      body: body,
-    );
+  final anyTaskActivityWanted = settings.myTaskNotifications || settings.teamTaskNotifications;
+  final changes = (anyTaskActivityWanted && !withinWindow)
+      ? const <TaskChangeResult>[]
+      : await detectTaskChanges(tasks, currentUserId: currentUserId);
+  // myTasksProvider ("/tasks/mine/all") mixes a manager/senior's own
+  // tasks together with every subordinate's (see
+  // task.controller.js#listMyTasksAll) -- this map is what tells "my
+  // task changed" apart from "a team member's task changed" below, since
+  // TaskChangeResult itself only carries the raw assigneeId.
+  final assigneeNameByTaskId = {
+    for (final t in tasks)
+      (t['_id'] ?? t['id'] ?? '').toString(): (t['assigneeId'] is Map ? t['assigneeId']['employeeName'] : null)?.toString(),
+  };
+  for (final change in changes) {
+    final isMine = currentUserId != null && change.assigneeId == currentUserId;
+    if (isMine) {
+      if (!settings.myTaskNotifications) continue;
+      // "New task assigned to you" and "an existing task changed" are
+      // separately controllable (see settings_provider.dart's own doc
+      // comment on taskAssigned/taskUpdates) -- a fresh assignment is
+      // usually worth knowing about even for someone who's muted the
+      // noisier "every edit" stream, or vice versa.
+      if (change.isNew ? !settings.taskAssigned : !settings.taskUpdates) continue;
+      final body = change.activityMessage ??
+          (change.isNew ? 'Assigned to you' : 'Task updated') +
+              (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
+      await NotificationService.instance.showTaskUpdateNotification(
+        taskId: change.taskId,
+        title: change.isNew ? 'New task: ${change.title}' : change.title,
+        body: body,
+      );
+    } else {
+      if (!settings.teamTaskNotifications) continue;
+      if (change.isNew ? !settings.teamTaskAssigned : !settings.teamTaskUpdates) continue;
+      final assigneeName = assigneeNameByTaskId[change.taskId] ?? 'A team member';
+      final body = change.activityMessage ??
+          (change.isNew ? 'Assigned to $assigneeName' : 'Updated') +
+              (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
+      await NotificationService.instance.showTaskUpdateNotification(
+        taskId: change.taskId,
+        title: change.isNew ? 'New team task: ${change.title}' : 'Team task updated: ${change.title}',
+        body: body,
+      );
+    }
   }
 
   // Manager-side alert: any of MY direct reports' tasks that are overdue
@@ -142,8 +200,16 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     for (final t in escalations) {
       final id = (t['_id'] ?? '').toString();
       if (id.isEmpty) continue;
+      final alreadyAlerted = alertedEscalationIds.contains(id);
+      // Once genuinely alerted, stays recorded as alerted regardless of
+      // the notification window -- only a NOT-yet-alerted one is left
+      // out of stillEscalatedIds while suppressed, so it's still treated
+      // as pending (not "already handled") once a later poll runs back
+      // inside the window. Marking it alerted here without ever having
+      // shown the notification would silence it permanently instead.
+      if (!alreadyAlerted && !withinWindow) continue;
       stillEscalatedIds.add(id);
-      if (alertedEscalationIds.contains(id)) continue;
+      if (alreadyAlerted) continue;
       final title = (t['name'] ?? 'Untitled task').toString();
       final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
       final spaceName = (t['spaceName'] ?? '').toString();
@@ -167,8 +233,13 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     for (final t in approvals) {
       final id = (t['_id'] ?? '').toString();
       if (id.isEmpty) continue;
+      final alreadyAlerted = alertedApprovalIds.contains(id);
+      // Same "stays recorded once genuinely alerted, otherwise left
+      // pending while suppressed" reasoning as the team-escalations loop
+      // above.
+      if (!alreadyAlerted && !withinWindow) continue;
       stillPendingIds.add(id);
-      if (alertedApprovalIds.contains(id)) continue;
+      if (alreadyAlerted) continue;
       final title = (t['name'] ?? 'Untitled task').toString();
       final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
       final spaceName = (t['spaceName'] ?? '').toString();
@@ -183,12 +254,9 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
 
   if (settings.taskDueReminders) {
     final alertedIds = await _loadAlertedIds();
-    final stillOverdueIds = <String>{};
-    // Separate from stillOverdueIds (which drives the feed's "Overdue: X"
-    // items and should keep listing a snoozed task) -- this is what
-    // actually gets persisted as "already alerted", so a still-snoozed
-    // task must be excluded from it. See the doc comment at its one
-    // populating site below.
+    // What actually gets persisted as "already alerted" (see
+    // _alertedOverdueIdsKey doc comment) -- a still-snoozed task is
+    // deliberately excluded from it below.
     final stillAlertedIds = <String>{};
 
     final prefsForSnooze = await SharedPreferences.getInstance();
@@ -229,51 +297,97 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         continue;
       }
 
+      // Feed items ("Overdue: X" / "Due soon: X") stay tied to dueDate --
+      // that's still what the task is actually due by. Only the loud
+      // full-screen alarm itself has moved to reminderAt below.
       final dueRaw = t['dueDate'];
-      if (dueRaw == null) continue;
-      final due = DateTime.tryParse(dueRaw.toString());
-      if (due == null) continue;
+      final due = dueRaw == null ? null : DateTime.tryParse(dueRaw.toString());
+      if (due != null) {
+        if (due.isBefore(now)) {
+          items.add(AppNotification(
+            id: 'overdue_$id',
+            kind: NotificationKind.taskOverdue,
+            title: 'Overdue: $title',
+            body: 'Was due ${_relative(due, now)}',
+            timestamp: due,
+            spaceName: spaceName.isNotEmpty ? spaceName : null,
+          ));
+        } else if (due.difference(now).inHours <= 48) {
+          items.add(AppNotification(
+            id: 'duesoon_$id',
+            kind: NotificationKind.taskDueSoon,
+            title: 'Due soon: $title',
+            body: 'Due ${_relative(due, now)}',
+            timestamp: due,
+            spaceName: spaceName.isNotEmpty ? spaceName : null,
+          ));
 
-      if (due.isBefore(now)) {
-        stillOverdueIds.add(id);
-        items.add(AppNotification(
-          id: 'overdue_$id',
-          kind: NotificationKind.taskOverdue,
-          title: 'Overdue: $title',
-          body: 'Was due ${_relative(due, now)}',
-          timestamp: due,
-          spaceName: spaceName.isNotEmpty ? spaceName : null,
-        ));
-
-        // Snoozed and still within the window -- see
-        // notification_service.dart's snoozeOverdueAlarm doc comment.
-        // `alertedIds` was deliberately cleared for this id on snooze, so
-        // without this check the block below would treat it as a fresh
-        // catch-up case and re-ring immediately instead of waiting out the
-        // snooze duration.
-        final snoozeUntilMs = snoozedUntil[id] as int?;
-        final stillSnoozed = snoozeUntilMs != null && now.millisecondsSinceEpoch < snoozeUntilMs;
-        if (snoozeUntilMs != null && !stillSnoozed) {
-          snoozedUntil.remove(id);
-          snoozeMapChanged = true;
+          // Schedule an actual device reminder ahead of the due time, so
+          // this surfaces even if the person isn't in the app when it
+          // matters -- deferred to the next allowed moment if the raw
+          // due-minus-N-hours instant itself would land outside the
+          // notification window (a holiday, a weekly off day, or outside
+          // office hours).
+          final remindAt = schedule.resolveNextAllowedInstant(
+            due.subtract(Duration(hours: settings.reminderHoursBefore)),
+          );
+          await NotificationService.instance.scheduleAt(
+            id: id.hashCode & 0x7fffffff,
+            title: 'Task due soon',
+            body: spaceName.isNotEmpty ? '$title · $spaceName' : title,
+            when: remindAt,
+          );
         }
+      }
 
+      // The loud full-screen alarm (sound, lock-screen takeover, Snooze/
+      // End) rings at reminderAt -- a date/time set independently of
+      // dueDate specifically so the alarm doesn't have to match when the
+      // work is actually due. Urgent AND assignee-only, same as before.
+      if (!isUrgent || !isMine) continue;
+      final reminderRaw = t['reminderAt'];
+      final reminder = reminderRaw == null ? null : DateTime.tryParse(reminderRaw.toString());
+      if (reminder == null) continue;
+
+      // Snoozed and still within the window -- see
+      // notification_service.dart's snoozeOverdueAlarm doc comment.
+      // `alertedIds` was deliberately cleared for this id on snooze, so
+      // without this check the block below would treat it as a fresh
+      // catch-up case and re-ring immediately instead of waiting out the
+      // snooze duration.
+      final snoozeUntilMs = snoozedUntil[id] as int?;
+      final stillSnoozed = snoozeUntilMs != null && now.millisecondsSinceEpoch < snoozeUntilMs;
+      if (snoozeUntilMs != null && !stillSnoozed) {
+        snoozedUntil.remove(id);
+        snoozeMapChanged = true;
+      }
+
+      if (reminder.isBefore(now)) {
+        final alreadyAlerted = alertedIds.contains(id);
         // Deliberately NOT added to stillAlertedIds while still snoozed --
         // stillAlertedIds is what gets persisted as the "already alerted"
         // record below, and marking a still-snoozed task as alerted before
         // it actually rings again would make the `!alertedIds.contains(id)`
         // check just below silently skip it forever once the snooze window
         // passes (confirmed live: this exact bug was why a snoozed alarm
-        // never came back). stillOverdueIds above still gets it, since the
-        // feed item itself should keep showing regardless of snooze state.
-        if (!stillSnoozed) stillAlertedIds.add(id);
+        // never came back). Also NOT added while it's genuinely new
+        // (never alerted) AND outside the notification window -- marking
+        // it alerted without ever actually ringing it would silence this
+        // alarm permanently instead of just deferring it to the next
+        // allowed moment. An already-alerted task stays marked alerted
+        // regardless of the window; it doesn't need to fire again.
+        if (!stillSnoozed && (alreadyAlerted || withinWindow)) stillAlertedIds.add(id);
 
-        // Catch-up path: this task became overdue without the alarm ever
-        // having been armed for it (e.g. it was created/assigned from
-        // the web app, so this device never had a chance to schedule
-        // it ahead of time via the `else` branch below). Fires once;
-        // `alertedIds` stops it from re-ringing on every feed refresh.
-        if (isUrgent && isMine && !stillSnoozed && !alertedIds.contains(id)) {
+        // Catch-up path: this task's reminder time passed without the
+        // alarm ever having been armed for it (e.g. it was created/
+        // assigned from the web app, so this device never had a chance to
+        // schedule it ahead of time via the `else` branch below). Fires
+        // once; `alertedIds` stops it from re-ringing on every feed
+        // refresh. Suppressed entirely outside the notification window --
+        // stays pending (not marked alerted, see above) so a later poll
+        // inside the window catches it up instead of it ringing late for
+        // one moment and then never again.
+        if (!stillSnoozed && !alreadyAlerted && withinWindow) {
           await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
           // Posting the notification above only gets Android to launch
           // the full-screen intent when the app is backgrounded/closed
@@ -288,42 +402,20 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
           pendingAlarmNotifier.value = {'taskId': id, 'taskName': title, 'spaceName': spaceName};
         }
       } else {
-        // Not overdue yet -- arm the alarm for the exact moment it
-        // becomes overdue (exact-time AlarmManager scheduling, so this
-        // still fires even if the app gets closed before then). Urgent
-        // AND assignee-only -- the quieter due-soon reminder just below
-        // still applies to every priority (and to a senior's view of
-        // their team's tasks too).
-        if (isUrgent && isMine) {
-          await NotificationService.instance.scheduleOverdueAlarmAt(
-            taskId: id,
-            taskName: title,
-            spaceName: spaceName,
-            when: due,
-          );
-        }
-
-        if (due.difference(now).inHours <= 48) {
-          items.add(AppNotification(
-            id: 'duesoon_$id',
-            kind: NotificationKind.taskDueSoon,
-            title: 'Due soon: $title',
-            body: 'Due ${_relative(due, now)}',
-            timestamp: due,
-            spaceName: spaceName.isNotEmpty ? spaceName : null,
-          ));
-
-          // Schedule an actual device reminder ahead of the due time, so
-          // this surfaces even if the person isn't in the app when it
-          // matters.
-          final remindAt = due.subtract(Duration(hours: settings.reminderHoursBefore));
-          await NotificationService.instance.scheduleAt(
-            id: id.hashCode & 0x7fffffff,
-            title: 'Task due soon',
-            body: spaceName.isNotEmpty ? '$title · $spaceName' : title,
-            when: remindAt,
-          );
-        }
+        // Not due yet -- arm the alarm for the exact reminder moment
+        // (exact-time AlarmManager scheduling, so this still fires even
+        // if the app gets closed before then). Deferred to the next
+        // allowed instant if the reminder itself was set for a holiday,
+        // a weekly off day, or outside office hours -- once armed at an
+        // exact wall-clock moment, the OS rings it right on time no
+        // matter what our own app logic thinks later, so this is the
+        // only point that can actually prevent that.
+        await NotificationService.instance.scheduleOverdueAlarmAt(
+          taskId: id,
+          taskName: title,
+          spaceName: spaceName,
+          when: schedule.resolveNextAllowedInstant(reminder),
+        );
       }
     }
 

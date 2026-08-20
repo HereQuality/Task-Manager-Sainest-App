@@ -50,6 +50,20 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     if (index == null) return;
     setState(() => _pageIndex = index);
     pendingHomeTabIndex.value = null;
+    _maybeRefreshOnTabShow(index);
+  }
+
+  // TasksScreen (and the two Pending/Awaiting Approval screens it feeds)
+  // stays alive forever inside the IndexedStack below rather than being
+  // rebuilt on every tab switch -- that's what makes switching tabs feel
+  // instant, but it also means pendingApprovalsProvider's autoDispose fetch
+  // only ever runs once and then sits cached, so a task delegated on the
+  // website while the app is just sitting open would otherwise never show
+  // up on the Tasks tab's DELEGATED group until a full app restart
+  // recreated every provider from scratch. Re-invalidating it every time
+  // this tab is actually switched to keeps it current without needing that.
+  void _maybeRefreshOnTabShow(int pageIndex) {
+    if (pageIndex == 1) ref.invalidate(pendingApprovalsProvider);
   }
 
   // Nav bar has 5 slots (Home, Tasks, +, Calendar, Profile) but only 4
@@ -64,7 +78,9 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       showAddTaskSheet(context, ref);
       return;
     }
-    setState(() => _pageIndex = navIndex < 2 ? navIndex : navIndex - 1);
+    final pageIndex = navIndex < 2 ? navIndex : navIndex - 1;
+    setState(() => _pageIndex = pageIndex);
+    _maybeRefreshOnTabShow(pageIndex);
   }
 
   @override

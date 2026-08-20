@@ -38,6 +38,20 @@ class MainActivity : FlutterActivity() {
     // Dart VM's state entirely; Dart then claims it via
     // "consumePendingDocument" whenever it comes back up. See
     // lib/core/pending_attachment_service.dart for the other half.
+    //
+    // "Take photo" is NOT handled this way (tried once, reverted -- see
+    // task_attachments_section.dart's own doc comment on why): the same
+    // native-handoff pattern was applied to the camera too, but its
+    // success/failure both had to be reported through
+    // recoverPendingUpload() in pending_attachment_service.dart, which only
+    // runs from an app-resume/auth-transition trigger in main.dart. On at
+    // least one Android phone that trigger never fired reliably after
+    // returning from the camera, so neither an upload nor an error ever
+    // appeared. image_picker's own pickImage(source: camera) doesn't share
+    // that weak link -- its Future resolves directly from onActivityResult
+    // with no lifecycle signal in between -- so it's the camera path again,
+    // with image_picker's own retrieveLostData() covering the rarer
+    // Activity-teardown case instead of a bespoke native flow.
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
