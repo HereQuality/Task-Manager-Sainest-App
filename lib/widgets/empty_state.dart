@@ -19,10 +19,18 @@ class EmptyState extends StatelessWidget {
     // SingleChildScrollView + a minHeight-constrained box keeps the same
     // centered look when everything fits, but scrolls instead of
     // overflowing when it doesn't (same pattern alarm_screen.dart uses).
+    //
+    // Some callers (dashboard/tickets/notifications screens) place this
+    // directly as a ListView child instead of behind Expanded/a Scaffold
+    // body, which hands LayoutBuilder an unbounded maxHeight -- forcing
+    // minHeight to that would build an invalid infinite-height
+    // BoxConstraints and crash performLayout. Falling back to 0 there just
+    // means the content sizes to itself instead of centering in unused
+    // space, which doesn't apply when there's no bound to center within.
     return LayoutBuilder(
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          constraints: BoxConstraints(minHeight: constraints.maxHeight.isFinite ? constraints.maxHeight : 0),
           child: Center(
             child: Padding(
               padding: const EdgeInsets.all(Gap.xxl),
@@ -64,7 +72,7 @@ class ErrorState extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          constraints: BoxConstraints(minHeight: constraints.maxHeight.isFinite ? constraints.maxHeight : 0),
           child: Center(
             child: Padding(
               padding: const EdgeInsets.all(Gap.xxl),
