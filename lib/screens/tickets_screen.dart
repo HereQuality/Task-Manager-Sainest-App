@@ -63,7 +63,10 @@ class TicketsScreen extends ConsumerWidget {
                   itemBuilder: (context, i) => _TicketCard(ticket: tickets[i]),
                 ),
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => ErrorState(message: '$e', onRetry: () => ref.invalidate(ticketsProvider)),
+          error: (e, _) => ErrorState(
+            message: 'Something went wrong loading tickets.',
+            onRetry: () => ref.invalidate(ticketsProvider),
+          ),
         ),
       ),
     );

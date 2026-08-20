@@ -6,9 +6,14 @@ import '../models/notification_item.dart';
 import '../providers/notifications_provider.dart';
 import '../widgets/empty_state.dart';
 
-class NotificationsScreen extends ConsumerWidget {
+class NotificationsScreen extends ConsumerStatefulWidget {
   const NotificationsScreen({super.key});
 
+  @override
+  ConsumerState<NotificationsScreen> createState() => _NotificationsScreenState();
+}
+
+class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
   IconData _iconFor(NotificationKind kind) {
     switch (kind) {
       case NotificationKind.taskOverdue:
@@ -32,7 +37,7 @@ class NotificationsScreen extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final feedAsync = ref.watch(notificationsFeedProvider);
 
     // Opening this screen is the only real "seen" signal the app has --
@@ -40,9 +45,18 @@ class NotificationsScreen extends ConsumerWidget {
     // (see markNotificationsSeen). Scheduled after the frame so it never
     // triggers a provider update mid-build; refreshes the Home bell's
     // badge right after so it reflects it immediately.
+    //
+    // Guarded with `mounted` before both the network call and the
+    // ref.invalidate after it -- unlike a plain ConsumerWidget (which this
+    // used to be, with no `mounted` to check at all), a person backing out
+    // of Notifications quickly can let markNotificationsSeen's await
+    // resolve after this screen is already disposed, and touching `ref`
+    // past that point throws.
     feedAsync.whenData((items) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
         await markNotificationsSeen(items);
+        if (!mounted) return;
         ref.invalidate(unreadNotificationCountProvider);
       });
     });
@@ -113,7 +127,14 @@ class NotificationsScreen extends ConsumerWidget {
             );
           },
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => ErrorState(message: '$e', onRetry: () => ref.invalidate(notificationsFeedProvider)),
+          // Was `message: '$e'` -- dumped the raw DioException (status code,
+          // MDN link, "verify and fix your request code" boilerplate and
+          // all) straight onto the screen. Matches the friendly-message
+          // pattern every other screen's ErrorState already uses.
+          error: (e, _) => ErrorState(
+            message: 'Something went wrong loading notifications.',
+            onRetry: () => ref.invalidate(notificationsFeedProvider),
+          ),
         ),
       ),
     );

@@ -54,6 +54,13 @@ class _TaskChecklistSectionState extends ConsumerState<TaskChecklistSection> {
   }
 
   void _addChecklist() {
+    // Guards every mutating action here, not just this one -- the "Add"
+    // buttons had no disabled-while-saving state at all, so a quick double
+    // tap could fire two overlapping PUTs (each built from the same
+    // pre-save widget.checklists snapshot) and end up creating the
+    // checklist/item twice. See task_comments_section.dart's send button
+    // for the same guard already applied there.
+    if (_saving) return;
     final title = _newChecklistCtrl.text.trim();
     if (title.isEmpty) return;
     final updated = _asList()
@@ -71,6 +78,7 @@ class _TaskChecklistSectionState extends ConsumerState<TaskChecklistSection> {
   }
 
   void _addItem(String checklistId) {
+    if (_saving) return;
     final ctrl = _itemCtrlFor(checklistId);
     final text = ctrl.text.trim();
     if (text.isEmpty) return;
@@ -120,7 +128,7 @@ class _TaskChecklistSectionState extends ConsumerState<TaskChecklistSection> {
             itemController: _itemCtrlFor((raw['_id'] ?? '').toString()),
             onToggleItem: (itemId, checked) => _toggleItem(raw['_id'].toString(), itemId, checked),
             onDeleteItem: (itemId) => _deleteItem(raw['_id'].toString(), itemId),
-            onAddItem: () => _addItem(raw['_id'].toString()),
+            onAddItem: _saving ? null : () => _addItem(raw['_id'].toString()),
             onDeleteChecklist: () => _deleteChecklist(raw['_id'].toString()),
           ),
         Row(
@@ -134,7 +142,7 @@ class _TaskChecklistSectionState extends ConsumerState<TaskChecklistSection> {
             ),
             IconButton(
               icon: const Icon(Icons.add_circle_rounded, color: AppColors.indigo),
-              onPressed: _addChecklist,
+              onPressed: _saving ? null : _addChecklist,
             ),
           ],
         ),
@@ -148,7 +156,7 @@ class _ChecklistCard extends StatelessWidget {
   final TextEditingController itemController;
   final void Function(String itemId, bool checked) onToggleItem;
   final void Function(String itemId) onDeleteItem;
-  final VoidCallback onAddItem;
+  final VoidCallback? onAddItem;
   final VoidCallback onDeleteChecklist;
 
   const _ChecklistCard({
@@ -221,7 +229,7 @@ class _ChecklistCard extends StatelessWidget {
                 child: TextField(
                   controller: itemController,
                   decoration: const InputDecoration(hintText: 'Add item', isDense: true, border: InputBorder.none),
-                  onSubmitted: (_) => onAddItem(),
+                  onSubmitted: (_) => onAddItem?.call(),
                 ),
               ),
               IconButton(

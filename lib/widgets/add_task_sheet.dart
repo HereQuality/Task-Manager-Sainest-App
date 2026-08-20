@@ -111,7 +111,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
     if (picked == null) return;
     setState(() {
       if (isStart) {
-        _startDate = picked;
+        _startDate = _todayAtCurrentTime(picked);
       } else {
         _dueDate = picked;
         // Auto-fill (or re-clamp) Start date the moment its valid range
@@ -123,10 +123,26 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
         // if they'd already picked a Start date that's still valid
         // against this due date.
         if (_startDate == null || _startDate!.isAfter(picked)) {
-          _startDate = today.isAfter(picked) ? picked : today;
+          _startDate = _todayAtCurrentTime(today.isAfter(picked) ? picked : today);
         }
       }
     });
+  }
+
+  // showDatePicker only ever returns a date at midnight -- there's no
+  // separate Start-time picker in this sheet at all, so a Start date left
+  // that way always saved as 00:00. For a Start date that lands on today,
+  // that read as "started at midnight" for a task someone is creating and
+  // starting right now, and it's what made the Start date the auto-fill
+  // set below fill in as today at 00:00 instead of today at whatever time
+  // it actually is. A date that ISN'T today keeps midnight -- there's no
+  // "actual" time to infer for a start date days in the future or past.
+  DateTime _todayAtCurrentTime(DateTime date) {
+    final now = DateTime.now();
+    if (date.year == now.year && date.month == now.month && date.day == now.day) {
+      return now;
+    }
+    return date;
   }
 
   Future<void> _pickDueTime() async {

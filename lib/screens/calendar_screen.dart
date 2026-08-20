@@ -156,7 +156,10 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => ErrorState(message: '$e', onRetry: () => ref.invalidate(myTasksProvider)),
+        error: (e, _) => ErrorState(
+          message: 'Something went wrong loading your tasks.',
+          onRetry: () => ref.invalidate(myTasksProvider),
+        ),
       ),
     );
   }

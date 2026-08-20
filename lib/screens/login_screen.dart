@@ -18,6 +18,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   bool _rememberMe = true;
   String? _error;
 
+  @override
+  void initState() {
+    super.initState();
+    // Picks up "Your session has expired..." if that's why this screen is
+    // showing at all (see auth_provider.dart's _onSessionExpired) --
+    // without this, that message only ever surfaced after a FAILED login
+    // attempt (see _submit below), so someone bounced here mid-session by
+    // an expired token just saw a blank login form with no explanation for
+    // why they were suddenly signed out.
+    final existingError = ref.read(authProvider).error;
+    if (existingError != null) _error = existingError;
+  }
+
   Future<void> _submit() async {
     if (_userCtrl.text.trim().isEmpty || _passCtrl.text.isEmpty) {
       setState(() => _error = 'Enter your username and password.');

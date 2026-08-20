@@ -16,6 +16,8 @@ class StatusPill extends StatelessWidget {
       decoration: BoxDecoration(color: style.bg, borderRadius: BorderRadius.circular(AppRadius.chip)),
       child: Text(
         status,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: TextStyle(color: style.fg, fontSize: 11.5, fontWeight: FontWeight.w700, letterSpacing: 0.1),
       ),
     );

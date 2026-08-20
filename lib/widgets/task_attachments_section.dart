@@ -300,6 +300,13 @@ class _AttachmentTile extends StatelessWidget {
                   borderRadius: BorderRadius.circular(8),
                   child: Image.network(
                     url, width: 40, height: 40, fit: BoxFit.cover,
+                    // Decodes straight to roughly this thumbnail's own
+                    // pixel size instead of full resolution -- a phone
+                    // camera photo attached here can be several MB/many
+                    // megapixels, and without this every one of them was
+                    // being fully decoded into memory just to be shown at
+                    // 40x40.
+                    cacheWidth: 80,
                     errorBuilder: (_, __, ___) => const Icon(Icons.image_outlined, color: AppColors.inkMuted),
                   ),
                 )

@@ -180,6 +180,20 @@ void _onServiceStart(ServiceInstance service) async {
     service.on('stopService').listen((event) => service.stopSelf());
   }
 
+  // A few seconds' grace before the very first tick's token read -- this
+  // service is started right at the end of login() (see auth_provider.dart),
+  // in a SEPARATE isolate from the one that just wrote that token to
+  // flutter_secure_storage. Reading the exact same encrypted file from two
+  // isolates in near lock-step, right when it was just written, is exactly
+  // the kind of timing that can trip resetOnError's error-recovery path
+  // (api_client.dart) into wiping the whole store over a transient
+  // decrypt hiccup -- deleting a token that was, a second ago, perfectly
+  // valid. Confirmed in practice: logging in showed the dashboard, then
+  // kicked straight back to login with "session expired" 2-3 seconds
+  // later. This delay only affects the FIRST tick after a fresh service
+  // start (fresh login, cold-start restore, or watchdog revival) -- every
+  // tick after it still runs on the normal ~60s cadence.
+  await Future.delayed(const Duration(seconds: 5));
   await _runTick();
   await _scheduleNextTick();
 }
@@ -233,11 +247,23 @@ Future<void> _runTick() async {
     // every check below, same rule notifications_provider.dart's
     // foreground pass applies.
     final schedule = await fetchNotificationSchedule();
-    await _checkOverdueTasksOnce(tasks, schedule);
-    await _checkTaskUpdatesOnce(tasks, schedule);
-    await _checkTeamEscalationsOnce(schedule);
-    await _checkPendingApprovalsOnce(schedule);
-    await _checkDailyDigestOnce(tasks, schedule);
+    // One SharedPreferences.getInstance() + .reload() for the whole tick,
+    // not one per check (each of the five checks below used to call both
+    // independently). .reload() is the expensive part on Android -- it
+    // forces a full re-read from disk rather than returning the isolate's
+    // already-cached copy -- so this was 5-6 separate disk reads every
+    // single tick, every ~60 seconds, indefinitely, which is real,
+    // avoidable I/O competing with whatever the person is actively doing
+    // in the foreground app at the same moment. All five checks still see
+    // one consistent, freshly-reloaded snapshot taken at the top of this
+    // tick -- nothing here depends on seeing a write from mid-tick.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    await _checkOverdueTasksOnce(tasks, schedule, prefs);
+    await _checkTaskUpdatesOnce(tasks, schedule, prefs);
+    await _checkTeamEscalationsOnce(schedule, prefs);
+    await _checkPendingApprovalsOnce(schedule, prefs);
+    await _checkDailyDigestOnce(tasks, schedule, prefs);
   } catch (e, st) {
     // Best-effort: a single failed poll (offline, expired token, server
     // hiccup) shouldn't kill the loop -- _scheduleNextTick() below still
@@ -254,9 +280,7 @@ Future<List<Map<String, dynamic>>> _fetchMyTasks() async {
   return List<Map<String, dynamic>>.from(data);
 }
 
-Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule) async {
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.reload();
+Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule, SharedPreferences prefs) async {
   final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet();
   final stillOverdueIds = <String>{};
   final now = DateTime.now();
@@ -369,9 +393,7 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
 // respects the person's "Allow notifications" master toggle, read
 // directly from SharedPreferences since this isolate has no Riverpod
 // ProviderScope to watch settingsProvider through.
-Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule) async {
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.reload();
+Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule, SharedPreferences prefs) async {
   if (!(prefs.getBool('notif_master') ?? true)) return;
   // Same split as notifications_provider.dart's foreground pass -- see
   // settings_provider.dart's doc comment on taskAssigned/taskUpdates.
@@ -440,12 +462,10 @@ Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, Notificatio
 // _alertedEscalationIdsKey record so a manager isn't notified twice for
 // the same overdue task once from each path. Safe to call for anyone;
 // the endpoint just returns an empty list for a non-manager.
-Future<void> _checkTeamEscalationsOnce(NotificationSchedule schedule) async {
+Future<void> _checkTeamEscalationsOnce(NotificationSchedule schedule, SharedPreferences prefs) async {
   final escalations = await fetchTeamOverdueEscalations();
   if (escalations.isEmpty) return;
 
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.reload();
   final alertedIds = (prefs.getStringList(_alertedEscalationIdsKey) ?? []).toSet();
   final stillEscalatedIds = <String>{};
   // Its own toggle -- see settings_provider.dart's doc comment on
@@ -489,12 +509,10 @@ Future<void> _checkTeamEscalationsOnce(NotificationSchedule schedule) async {
 // _alertedApprovalIdsKey record. Safe to call for anyone; the endpoint
 // just returns an empty list for someone with no pending delegated
 // completions.
-Future<void> _checkPendingApprovalsOnce(NotificationSchedule schedule) async {
+Future<void> _checkPendingApprovalsOnce(NotificationSchedule schedule, SharedPreferences prefs) async {
   final approvals = await fetchPendingApprovals();
   if (approvals.isEmpty) return;
 
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.reload();
   final alertedIds = (prefs.getStringList(_alertedApprovalIdsKey) ?? []).toSet();
   final stillPendingIds = <String>{};
   // Its own toggle -- see settings_provider.dart's doc comment on
@@ -546,7 +564,7 @@ Future<void> _checkPendingApprovalsOnce(NotificationSchedule schedule) async {
 // (not the wider manager/subordinate mix `tasks` carries for
 // _checkOverdueTasksOnce etc.) -- this is "your own day", not a
 // team roll-up.
-Future<void> _checkDailyDigestOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule) async {
+Future<void> _checkDailyDigestOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule, SharedPreferences prefs) async {
   // No office hours configured means no anchor time to send at -- rather
   // than guessing a fallback hour, the digest simply stays off until a
   // Full Access person sets one on the Teams page.
@@ -557,8 +575,6 @@ Future<void> _checkDailyDigestOnce(List<Map<String, dynamic>> tasks, Notificatio
   final atEnd = schedule.isWithinOfficeEndWindow(now);
   if (!atStart && !atEnd) return;
 
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.reload();
   if (!(prefs.getBool('notif_master') ?? true)) return;
   // Its own toggle -- see settings_provider.dart's doc comment on
   // dailyDigest.

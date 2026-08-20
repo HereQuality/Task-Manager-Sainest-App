@@ -88,15 +88,20 @@ class DashboardScreen extends ConsumerWidget {
                 final inProgress = (stats['inProgress'] as num?) ?? 0;
                 final delayed = (stats['delayed'] as num?) ?? 0;
                 final atsScore = (stats['atsScore'] as num?)?.toDouble() ?? 0;
-                // Judged tasks only -- completed (on-time or delayed) or
-                // overdue -- same reasoning as the web Dashboard's own fix:
-                // In Progress tasks not yet due haven't been judged either
-                // way, so dividing by totalTask (which still includes them)
-                // understated this percentage for no reason tied to actual
-                // performance.
-                final judgedTotal = onTimeCompletion + delayed + overdue;
-                final otcPct =
-                    judgedTotal > 0 ? (onTimeCompletion / judgedTotal) * 100 : 0;
+                // On-time completions vs delayed completions only --
+                // deliberately excludes both In Progress (not yet judged,
+                // same reasoning as ATS) AND Overdue: an overdue task hasn't
+                // been completed at all yet, so counting it against this
+                // percentage penalizes it twice over once it eventually IS
+                // completed (late, into the "delayed" bucket) -- once while
+                // still overdue, and again once it lands in delayed. This
+                // is meant to answer "of the tasks people actually
+                // finished, how many finished on time", not "how many of
+                // everything ever assigned is currently on time".
+                final onTimeJudgedTotal = onTimeCompletion + delayed;
+                final otcPct = onTimeJudgedTotal > 0
+                    ? (onTimeCompletion / onTimeJudgedTotal) * 100
+                    : 0;
 
                 return Column(
                   children: [

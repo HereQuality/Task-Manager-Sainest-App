@@ -78,7 +78,12 @@ class EntityCard extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: Gap.sm),
-                      StatusPill(status: status),
+                      // Flexible, not a bare StatusPill: the Expanded title
+                      // column above only bounds itself, not this pill's own
+                      // intrinsic width -- a long status string (e.g.
+                      // "COMPLETE (LATE)") at large system font scale on a
+                      // narrow phone could otherwise overflow this Row.
+                      Flexible(child: StatusPill(status: status)),
                     ],
                   ),
                 ),

@@ -21,9 +21,58 @@ class AuthState {
 class AuthNotifier extends StateNotifier<AuthState> {
   AuthNotifier() : super(const AuthState()) {
     _restoreSession();
+    // See sessionExpiredNotifier's own doc comment in api_client.dart --
+    // without this, a 401 anywhere in the app (expired/revoked token)
+    // cleared the token from storage but left AuthState untouched, so the
+    // person stayed stuck on whatever screen they were on, watching every
+    // request fail with the same raw error, with no path back to login
+    // short of a manual logout or force-closing the app.
+    sessionExpiredNotifier.addListener(_onSessionExpired);
   }
 
   final _dio = ApiClient.instance;
+
+  // Set the instant state becomes authenticated (both login() and a
+  // restored session below) -- see _onSessionExpired's own grace-period
+  // check on this.
+  DateTime? _authenticatedAt;
+
+  void _onSessionExpired() {
+    // Guarded so this can't clobber a login attempt already in progress
+    // (login()'s own catch sets its own precise error message) or pile a
+    // second transition on top of one that's already happened.
+    if (state.status != AuthStatus.authenticated) return;
+    // A 401 arriving within a few seconds of becoming authenticated is far
+    // more likely to be a local race than a genuinely dead token the
+    // server just issued: startBackgroundWatcher() (called right below,
+    // both here and in login()) spins up a SEPARATE isolate that reads/
+    // writes the exact same encrypted token file this isolate just wrote
+    // to, and flutter_secure_storage's resetOnError (api_client.dart) will
+    // wipe that ENTIRE file the moment either isolate hits a transient
+    // decrypt hiccup while the other is mid-write -- deleting a token that
+    // was, from the person's perspective, valid a second ago. Before this
+    // guard existed, that race showed up as: dashboard loads fine, then
+    // 2-3 seconds later "Your session has expired" kicks them straight
+    // back to login, immediately after a login that plainly worked. If the
+    // token really is dead, the very next request fails 401 again past
+    // this window and the redirect still happens -- just not on the false
+    // positive from the startup race.
+    if (_authenticatedAt != null && DateTime.now().difference(_authenticatedAt!) < const Duration(seconds: 8)) {
+      return;
+    }
+    pendingAlarmNotifier.value = null;
+    stopBackgroundWatcher();
+    state = const AuthState(
+      status: AuthStatus.unauthenticated,
+      error: 'Your session has expired. Please log in again.',
+    );
+  }
+
+  @override
+  void dispose() {
+    sessionExpiredNotifier.removeListener(_onSessionExpired);
+    super.dispose();
+  }
 
   Future<void> _restoreSession() async {
     String? token;
@@ -82,6 +131,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // back to the login screen.
       final user = AppUser.fromJson(res.data['data']);
       state = AuthState(status: AuthStatus.authenticated, user: user);
+      _authenticatedAt = DateTime.now();
       await _dio.saveCurrentUserId(user.id);
       // Restarts the watcher every cold start, not just at login -- the
       // service isn't guaranteed to have survived a full device reboot or
@@ -142,6 +192,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // auth.controller.js) -- unlike /auth/me above, which doesn't.
       final user = AppUser.fromJson(res.data['data']['user']);
       state = AuthState(status: AuthStatus.authenticated, user: user);
+      _authenticatedAt = DateTime.now();
       await _dio.saveCurrentUserId(user.id);
       await startBackgroundWatcher();
       return true;

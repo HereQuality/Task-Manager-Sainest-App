@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:socket_io_client/socket_io_client.dart' as socket_io;
 import 'api_client.dart';
@@ -34,6 +35,16 @@ class SocketService {
   static final instance = SocketService._();
 
   socket_io.Socket? _socket;
+  // Debounces bursts of task:created/task:updated into one
+  // taskRealtimeEventNotifier bump -- on a busy team, several unrelated
+  // task changes can arrive within the same second, and each one used to
+  // fire an immediate refetch on Pending Approvals/Awaiting Approval while
+  // either was open, producing back-to-back network calls and visible
+  // rebuild flicker for events that, individually, were often irrelevant
+  // to what was actually on screen. 500ms is short enough that a single
+  // real event still feels instant, but long enough to collapse a burst
+  // into the one refetch that actually matters.
+  Timer? _debounce;
 
   /// Connects using the currently-stored access token. Safe to call
   /// repeatedly -- a live connection is left alone rather than torn down
@@ -68,9 +79,14 @@ class SocketService {
     _socket!
       ..onConnectError((_) {})
       ..onError((_) {})
-      ..on('task:created', (_) => taskRealtimeEventNotifier.value++)
-      ..on('task:updated', (_) => taskRealtimeEventNotifier.value++)
+      ..on('task:created', (_) => _onTaskEvent())
+      ..on('task:updated', (_) => _onTaskEvent())
       ..connect();
+  }
+
+  void _onTaskEvent() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 500), () => taskRealtimeEventNotifier.value++);
   }
 
   /// Called on logout -- a stale token in an open socket would otherwise
@@ -78,6 +94,7 @@ class SocketService {
   /// restarts, since the server only checks the JWT once, at the initial
   /// handshake.
   void disconnect() {
+    _debounce?.cancel();
     _socket?.dispose();
     _socket = null;
   }

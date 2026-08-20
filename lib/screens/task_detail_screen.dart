@@ -261,7 +261,6 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
           final assigneeName = assigneeId != null && assigneeId == currentUserId ? 'Me' : assignee?['employeeName']?.toString();
           final priority = t['priority']?.toString();
           final description = (t['description'] ?? '').toString();
-          final dateFmt = DateFormat('dd/MM/yyyy');
           final dateTimeFmt = DateFormat('dd/MM/yyyy, hh:mm a');
           final startDate = _parseDate(t['startDate']);
           final dueDate = _parseDate(t['dueDate']);
@@ -425,12 +424,23 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
               _DetailRow(
                 icon: Icons.play_circle_outline_rounded,
                 label: 'Start date',
-                value: startDate != null ? dateFmt.format(startDate) : 'Not set',
+                // Was date-only -- Start date now genuinely carries a real
+                // time-of-day (current time when it lands on today, see
+                // add_task_sheet.dart/edit_task_sheet.dart's
+                // _todayAtCurrentTime), so hiding it here made that fix
+                // invisible.
+                value: startDate != null ? dateTimeFmt.format(startDate) : 'Not set',
               ),
               _DetailRow(
                 icon: Icons.event_outlined,
                 label: 'Due date',
-                value: dueDate != null ? dateFmt.format(dueDate) : 'Not set',
+                // Was date-only -- Due date always carries a real
+                // time-of-day too, whether explicitly picked or defaulted
+                // to end-of-day (23:59, see add_task_sheet.dart/
+                // edit_task_sheet.dart's dueDateTime), and that exact
+                // moment is what overdue/completion timing is actually
+                // judged against.
+                value: dueDate != null ? dateTimeFmt.format(dueDate) : 'Not set',
               ),
               _DetailRow(
                 icon: Icons.alarm_rounded,
@@ -475,7 +485,14 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
 
   DateTime? _parseDate(dynamic value) {
     if (value == null) return null;
-    return DateTime.tryParse(value.toString());
+    // .toLocal() -- the server sends UTC ('Z'-suffixed) timestamps; without
+    // converting back, DateFormat below prints the UTC calendar date/time
+    // directly. In a timezone ahead of UTC (e.g. IST, UTC+5:30) that showed
+    // a start/due date picked as "today" as the day before, and a reminder
+    // time hours off from what was actually picked (and what the alarm
+    // itself correctly fires at, since NotificationService schedules off
+    // the same underlying instant, not this display path).
+    return DateTime.tryParse(value.toString())?.toLocal();
   }
 }
 

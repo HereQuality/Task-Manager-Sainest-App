@@ -425,8 +425,14 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               } else if (_dueFilter == _DueFilter.today) {
                 if (t['status'] == 'COMPLETE') return false;
                 final due = t['dueDate'];
-                final d =
-                    due != null ? DateTime.tryParse(due.toString()) : null;
+                // .toLocal() -- comparing y/m/d fields directly, so this
+                // has to be in the same timezone as `now` (already local).
+                // Without it, a task due today evening in a timezone ahead
+                // of UTC (e.g. IST) reads as UTC's still-yesterday date and
+                // silently drops out of "Due Today".
+                final d = due != null
+                    ? DateTime.tryParse(due.toString())?.toLocal()
+                    : null;
                 if (d == null) return false;
                 if (!(d.year == now.year &&
                     d.month == now.month &&
@@ -850,7 +856,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           },
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => ErrorState(
-              message: '$e', onRetry: () => ref.invalidate(myTasksProvider)),
+            message: 'Something went wrong loading your tasks.',
+            onRetry: () => ref.invalidate(myTasksProvider),
+          ),
         ),
       ),
     );

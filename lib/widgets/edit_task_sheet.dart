@@ -118,14 +118,26 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
     if (picked == null) return;
     setState(() {
       if (isStart) {
-        _startDate = picked;
+        _startDate = _todayAtCurrentTime(picked);
       } else {
         _dueDate = picked;
         if (_startDate == null || _startDate!.isAfter(picked)) {
-          _startDate = today.isAfter(picked) ? picked : today;
+          _startDate = _todayAtCurrentTime(today.isAfter(picked) ? picked : today);
         }
       }
     });
+  }
+
+  // Same reasoning as add_task_sheet.dart's own copy of this -- there's no
+  // separate Start-time picker, so showDatePicker's midnight-only result
+  // used to save "started at midnight" even when the actual intent (a
+  // Start date landing on today) is "started right now".
+  DateTime _todayAtCurrentTime(DateTime date) {
+    final now = DateTime.now();
+    if (date.year == now.year && date.month == now.month && date.day == now.day) {
+      return now;
+    }
+    return date;
   }
 
   Future<void> _pickDueTime() async {
