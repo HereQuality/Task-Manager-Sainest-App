@@ -221,11 +221,82 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
       // rather than a generic error -- that message already explains
       // exactly why, same as the website shows.
       final msg = e.response?.data?['message']?.toString() ?? 'Could not save this task.';
+      // Same substring match as isLockedTaskError in the web app's
+      // SpaceDetail.jsx -- every locked-edit 403 message contains this
+      // phrase (see isPastEditGracePeriod's own error text in
+      // task.controller.js), which is how the website tells "blocked
+      // because of the lock, offer to request an exception" apart from
+      // every other kind of failure. Read & Write people (not Full
+      // Access) hit this constantly once 5 minutes has passed since
+      // assignment -- without this, the phone's only option was reading
+      // the error and giving up, while the same person on the website
+      // could file a request right there.
+      if (e.response?.statusCode == 403 && msg.contains('no longer be') && mounted) {
+        await _offerLockOverrideRequest(
+          lockMessage: msg,
+          name: name,
+          dueDateTime: dueDateTime,
+          reminderDateTime: reminderDateTime,
+        );
+        return;
+      }
       setState(() => _error = msg);
     } catch (e) {
       setState(() => _error = 'Could not save this task.');
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _offerLockOverrideRequest({
+    required String lockMessage,
+    required String name,
+    required DateTime? dueDateTime,
+    required DateTime? reminderDateTime,
+  }) async {
+    final reason = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => _LockOverrideRequestSheet(lockMessage: lockMessage),
+    );
+    if (reason == null) {
+      // Cancelled -- leave the sheet open on the original error, same as
+      // before this flow existed, rather than silently discarding what
+      // they were trying to change.
+      if (mounted) setState(() => _error = lockMessage);
+      return;
+    }
+
+    try {
+      await requestLockOverride(
+        widget.task['_id'].toString(),
+        reason: reason,
+        // Only the fields LOCK_OVERRIDE_PATCH_FIELDS actually accepts
+        // (task.controller.js) -- matches exactly what updateTaskDetails
+        // above just tried to send, so approving this later applies the
+        // identical change.
+        patch: {
+          'name': name,
+          'assigneeId': _assigneeId,
+          'priority': _priority,
+          'startDate': _startDate?.toUtc().toIso8601String(),
+          'dueDate': dueDateTime?.toUtc().toIso8601String(),
+          'reminderAt': reminderDateTime?.toUtc().toIso8601String(),
+        },
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Request sent — waiting on a Full Access person's approval.")),
+        );
+        Navigator.pop(context, true);
+      }
+    } on DioException catch (e) {
+      final msg = e.response?.data?['message']?.toString() ?? 'Could not send the request.';
+      if (mounted) setState(() => _error = msg);
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Could not send the request.');
     }
   }
 
@@ -414,6 +485,89 @@ class _EditDateField extends StatelessWidget {
           value ?? 'Not set',
           style: TextStyle(color: value == null ? AppColors.inkMuted : AppColors.ink),
         ),
+      ),
+    );
+  }
+}
+
+/// The 5-minute lock's "request an exception" prompt -- mirrors the web
+/// app's LockOverrideRequestModal.jsx. Returns the trimmed reason on
+/// submit, or null if cancelled; requestLockOverride's own server-side
+/// validation is the actual source of truth for "reason required", this
+/// just disables Send until there's something to submit so the common
+/// case doesn't round-trip to the server only to bounce right back.
+class _LockOverrideRequestSheet extends StatefulWidget {
+  final String lockMessage;
+  const _LockOverrideRequestSheet({required this.lockMessage});
+
+  @override
+  State<_LockOverrideRequestSheet> createState() => _LockOverrideRequestSheetState();
+}
+
+class _LockOverrideRequestSheetState extends State<_LockOverrideRequestSheet> {
+  final _reasonCtrl = TextEditingController();
+  bool _hasText = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _reasonCtrl.addListener(() {
+      final hasText = _reasonCtrl.text.trim().isNotEmpty;
+      if (hasText != _hasText) setState(() => _hasText = hasText);
+    });
+  }
+
+  @override
+  void dispose() {
+    _reasonCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: Gap.xl, right: Gap.xl, top: Gap.xl,
+        bottom: MediaQuery.of(context).viewInsets.bottom + Gap.xl,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Request approval to edit', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: Gap.xs),
+          Text(widget.lockMessage, style: Theme.of(context).textTheme.bodyMedium),
+          const SizedBox(height: Gap.xs),
+          Text(
+            "A Full Access person on this team can approve it and apply your change, or send it back.",
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.inkMuted),
+          ),
+          const SizedBox(height: Gap.lg),
+          TextField(
+            controller: _reasonCtrl,
+            maxLines: 3,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Why does this need to change?'),
+          ),
+          const SizedBox(height: Gap.xl),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+              ),
+              const SizedBox(width: Gap.sm),
+              Expanded(
+                child: FilledButton(
+                  onPressed: _hasText ? () => Navigator.pop(context, _reasonCtrl.text.trim()) : null,
+                  child: const Text('Send request'),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

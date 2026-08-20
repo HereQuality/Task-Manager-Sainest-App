@@ -231,6 +231,32 @@ Future<void> rejectLockOverride(String taskId, {String? reason}) async {
   });
 }
 
+/// POST /api/v1/tasks/:id/lock-override/request -- files a request to
+/// bypass the 5-minute edit lock, for a Read & Write person (not Full
+/// Access) who just got blocked by updateTaskDetails' own 403 (see
+/// isPastEditGracePeriod/requestLockOverride in task.controller.js). The
+/// server requires a non-empty reason and returns its own 400 if it's
+/// missing, same as the web app's LockOverrideRequestModal.jsx --
+/// deliberately not re-validated client-side here for the same "let the
+/// server's message be the one source of truth" reasoning the rest of this
+/// file already follows. `patch` carries the exact field changes the
+/// person was trying to make (only fields in LOCK_OVERRIDE_PATCH_FIELDS
+/// are actually applied on approval; anything else is silently ignored
+/// server-side), so a Full Access approver sees -- and, on approval,
+/// actually applies -- the same change, not just "someone wants to edit
+/// this".
+Future<void> requestLockOverride(
+  String taskId, {
+  required String reason,
+  Map<String, dynamic>? patch,
+}) async {
+  await ApiClient.instance.dio.post('/tasks/$taskId/lock-override/request', data: {
+    'type': 'EDIT',
+    'reason': reason,
+    if (patch != null) 'patch': patch,
+  });
+}
+
 /// A task's subtasks -- GET /api/v1/tasks/:id/subtasks (same endpoint
 /// TaskDetailModal.jsx's Subtasks panel uses).
 final subtasksProvider = FutureProvider.autoDispose
