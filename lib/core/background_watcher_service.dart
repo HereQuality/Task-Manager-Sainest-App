@@ -618,41 +618,71 @@ DateTime? _dueDateOf(Map<String, dynamic> t) {
 
 String _pluralTask(int n) => n == 1 ? '1 task' : '$n tasks';
 
-String _buildMorningDigestBody(List<Map<String, dynamic>> mine, DateTime now) {
+// The morning digest's whole point is "how much is on my plate today" as
+// one glanceable count, broken down into what's actually due today vs.
+// what's already rolling from a prior day -- so the evening digest below
+// can compare against the SAME "due today" set as its "Plan" (see
+// _plannedForToday, shared by both bodies for exactly this reason: the
+// evening's Plan number must be what the morning message told the person
+// their plan for the day was, not silently redefined a second time).
+List<Map<String, dynamic>> _plannedForToday(List<Map<String, dynamic>> mine, DateTime now) {
   final todayKey = businessDayKeyFor(now);
-  final active = mine.where((t) => !_isTaskComplete(t));
-  final dueToday = active.where((t) {
+  return mine.where((t) {
     final due = _dueDateOf(t);
     return due != null && businessDayKeyFor(due) == todayKey;
-  }).length;
-  final inProgress = active.where((t) => _statusContains(t, 'progress')).length;
+  }).toList();
+}
 
-  if (dueToday == 0 && inProgress == 0) {
-    return "You've got a clear board this morning -- no tasks due today. Have a great day.";
+String _buildMorningDigestBody(List<Map<String, dynamic>> mine, DateTime now) {
+  final planned = _plannedForToday(mine, now);
+  final active = mine.where((t) => !_isTaskComplete(t));
+  final inProgress = active.where((t) => _statusContains(t, 'progress')).length;
+  // Today's total workload count -- planned-for-today tasks plus whatever
+  // else is already in progress from before, deduped so a task that's
+  // BOTH due today and already in progress isn't counted twice.
+  final plannedIds = planned.map((t) => t['_id']?.toString()).toSet();
+  final inProgressExtra = active.where((t) => _statusContains(t, 'progress') && !plannedIds.contains(t['_id']?.toString())).length;
+  final total = planned.length + inProgressExtra;
+
+  if (total == 0) {
+    return "You've got a clear board this morning -- no tasks lined up for today. Have a great day.";
   }
-  final duePart = '${_pluralTask(dueToday)} due today';
-  final progressPart = inProgress == 1 ? '1 already in progress' : '$inProgress already in progress';
-  return 'You have $duePart, $progressPart. Wishing you a productive day ahead.';
+  return 'Today you have ${_pluralTask(total)} -- ${_pluralTask(planned.length)} due today'
+      '${inProgress > 0 ? ', $inProgress already in progress' : ''}. Wishing you a productive day ahead.';
 }
 
 String _buildEveningDigestBody(List<Map<String, dynamic>> mine, DateTime now) {
   final todayKey = businessDayKeyFor(now);
+  final planned = _plannedForToday(mine, now);
+  final planCount = planned.length;
+  final plannedCompleted = planned.where(_isTaskComplete).length;
+
   final completedToday = mine.where((t) {
     if (!_isTaskComplete(t)) return false;
     final updatedRaw = t['updatedAt'];
     final updated = updatedRaw == null ? null : DateTime.tryParse(updatedRaw.toString());
     return updated != null && businessDayKeyFor(updated) == todayKey;
   }).length;
+
   final active = mine.where((t) => !_isTaskComplete(t));
-  final inProgress = active.where((t) => _statusContains(t, 'progress')).length;
   final overdue = active.where((t) {
     final due = _dueDateOf(t);
     return due != null && due.isBefore(now);
   }).length;
 
-  final summary = '${_pluralTask(completedToday)} completed, ${_pluralTask(inProgress)} in progress, ${_pluralTask(overdue)} overdue';
-  if (overdue > 0) {
-    return "Here's how today went: $summary. Worth a look before tomorrow.";
+  if (planCount == 0 && completedToday == 0) {
+    return 'Nothing was planned for today and nothing was completed. Plan: 0 tasks · Actual: 0 completed.';
   }
-  return "Here's how today went: $summary. Thank you for a productive day.";
+
+  // "Actual" is every task actually finished today, not just the ones that
+  // were on today's plan -- someone who cleared 3 planned tasks AND picked
+  // up 2 extra unplanned ones completed 5, and the digest should say 5, not
+  // silently cap it at the plan count.
+  final planVsActual = 'Plan: ${_pluralTask(planCount)} for today · Actual: ${_pluralTask(completedToday)} completed'
+      '${planCount > 0 ? ' ($plannedCompleted of $planCount planned)' : ''}';
+
+  if (overdue > 0) {
+    return "Here's how today went: $planVsActual, ${_pluralTask(overdue)} overdue. Worth a look before tomorrow.";
+  }
+  return "Here's how today went: $planVsActual. Thank you for a productive day.";
 }

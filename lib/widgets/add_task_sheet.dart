@@ -4,8 +4,11 @@ import 'package:intl/intl.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
+import '../providers/projects_provider.dart';
 import '../providers/spaces_provider.dart';
 import '../providers/tasks_provider.dart';
+import 'searchable_employee_field.dart';
+import 'time_picker_sheet.dart';
 
 const _priorities = ['Urgent', 'High', 'Normal', 'Low'];
 
@@ -15,16 +18,20 @@ class _AddTaskResult {
   final DateTime? startDate;
   final DateTime? dueDate;
   final DateTime? reminderAt;
+  final List<DateTime> extraReminders;
   final String? priority;
   final String? assigneeId;
+  final String? projectId;
   _AddTaskResult({
     required this.name,
     required this.spaceId,
     this.startDate,
     this.dueDate,
     this.reminderAt,
+    this.extraReminders = const [],
     this.priority,
     this.assigneeId,
+    this.projectId,
   });
 }
 
@@ -54,7 +61,9 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
     startDate: result.startDate,
     dueDate: result.dueDate,
     reminderAt: result.reminderAt,
+    extraReminders: result.extraReminders,
     priority: result.priority,
+    projectId: result.projectId,
   );
   ref.invalidate(myTasksProvider);
   ref.invalidate(dashboardStatsProvider);
@@ -74,12 +83,20 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   final _nameCtrl = TextEditingController();
   String? _spaceId;
   String? _assigneeId;
+  String? _projectId;
   String? _priority;
   DateTime? _startDate;
   DateTime? _dueDate;
   TimeOfDay? _dueTime;
   DateTime? _reminderDate;
   TimeOfDay? _reminderTime;
+  // Extra, plain reminders added via the "+" next to Reminder date/time --
+  // each just a normal notification at its own moment, no alarm/snooze
+  // (see Task.js's extraReminders doc comment for why these are kept
+  // separate from the Urgent-only overdue alarm above). Kept sorted so
+  // the list on screen always reads chronologically regardless of the
+  // order they were added in.
+  final List<DateTime> _extraReminders = [];
 
   @override
   void dispose() {
@@ -145,11 +162,15 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
     return date;
   }
 
+  // TimeOfDay.format(context) defaults to whatever the DEVICE's own
+  // 24-hour setting is (System Settings > Date & time > 24-hour format),
+  // which on plenty of phones is ON -- this always formats as 12-hour +
+  // AM/PM regardless of that device setting, matching pickTime12h's own
+  // wheel picker below.
+  String _formatTimeOfDay12h(TimeOfDay t) => formatTimeOfDay12h(t);
+
   Future<void> _pickDueTime() async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: _dueTime ?? TimeOfDay.now(),
-    );
+    final picked = await pickTime12h(context, initialTime: _dueTime ?? TimeOfDay.now(), title: 'Due time');
     if (picked == null) return;
     setState(() => _dueTime = picked);
   }
@@ -171,12 +192,31 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   }
 
   Future<void> _pickReminderTime() async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: _reminderTime ?? TimeOfDay.now(),
-    );
+    final picked = await pickTime12h(context, initialTime: _reminderTime ?? TimeOfDay.now(), title: 'Reminder time');
     if (picked == null) return;
     setState(() => _reminderTime = picked);
+  }
+
+  // "+" next to Reminder date/time -- picks one more date+time (date then
+  // time, same two-step flow as the main reminder above) and appends it to
+  // _extraReminders. Any future moment is fair game, independent of the
+  // main reminder/due/start dates -- these are just extra personal nudges.
+  Future<void> _addExtraReminder() async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final date = await showDatePicker(
+      context: context,
+      initialDate: today,
+      firstDate: today,
+      lastDate: DateTime(now.year + 5),
+    );
+    if (date == null || !mounted) return;
+    final time = await pickTime12h(context, initialTime: TimeOfDay.now(), title: 'Reminder time');
+    if (time == null) return;
+    setState(() {
+      _extraReminders.add(DateTime(date.year, date.month, date.day, time.hour, time.minute));
+      _extraReminders.sort();
+    });
   }
 
   // The overdue alarm (see NotificationService) needs an exact reminder
@@ -226,8 +266,10 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
         startDate: _startDate,
         dueDate: dueDateTime,
         reminderAt: reminderDateTime,
+        extraReminders: _extraReminders,
         priority: _priority,
         assigneeId: _assigneeId,
+        projectId: _projectId,
       ),
     );
   }
@@ -235,6 +277,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   @override
   Widget build(BuildContext context) {
     final spacesAsync = ref.watch(spacesProvider);
+    final projectsAsync = ref.watch(projectsProvider);
     final employeesAsync = ref.watch(assignableEmployeesProvider);
     final currentUserId = ref.watch(authProvider).user?.id;
     final dateFmt = DateFormat('dd/MM/yyyy');
@@ -277,6 +320,35 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             ),
             const SizedBox(height: Gap.md),
 
+            // Optional -- a task doesn't have to belong to a Project. Every
+            // active Project in the company is offered here (see
+            // projects_provider.dart), same "not scoped to the chosen
+            // Space" reasoning the Assign To picker below already uses.
+            projectsAsync.when(
+              data: (projects) => DropdownButtonFormField<String>(
+                initialValue: _projectId,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Project (optional)'),
+                items: [
+                  const DropdownMenuItem<String>(value: null, child: Text('None')),
+                  ...projects.map((p) => DropdownMenuItem<String>(
+                        value: p['_id'] as String,
+                        child: Text(
+                          p['projectName']?.toString() ?? 'Untitled project',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      )),
+                ],
+                onChanged: (v) => setState(() => _projectId = v),
+              ),
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: Gap.sm),
+                child: LinearProgressIndicator(),
+              ),
+              error: (e, _) => Text('Could not load projects.', style: Theme.of(context).textTheme.bodyMedium),
+            ),
+            const SizedBox(height: Gap.md),
+
             Row(
               children: [
                 Expanded(
@@ -291,7 +363,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
                 Expanded(
                   child: _DatePickerField(
                     label: 'Due time',
-                    value: _dueTime?.format(context),
+                    value: _dueTime != null ? _formatTimeOfDay12h(_dueTime!) : null,
                     onTap: _pickDueTime,
                     onClear: _dueTime == null ? null : () => setState(() => _dueTime = null),
                     icon: Icons.access_time_rounded,
@@ -340,7 +412,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
                 Expanded(
                   child: _DatePickerField(
                     label: _priority == 'Urgent' ? 'Reminder time *' : 'Reminder time',
-                    value: _reminderTime?.format(context),
+                    value: _reminderTime != null ? _formatTimeOfDay12h(_reminderTime!) : null,
                     onTap: _pickReminderTime,
                     onClear: _reminderTime == null ? null : () => setState(() => _reminderTime = null),
                     icon: Icons.access_time_rounded,
@@ -357,31 +429,56 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             ],
             const SizedBox(height: Gap.md),
 
+            // Extra reminders -- as many plain "ping me at this moment"
+            // reminders as the person wants, on top of the one above. Each
+            // just posts a normal notification when it fires; only the
+            // single Reminder date/time above ever drives the loud
+            // full-screen overdue alarm.
+            Row(
+              children: [
+                Text('Extra reminders', style: Theme.of(context).textTheme.titleSmall),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: _addExtraReminder,
+                  icon: const Icon(Icons.add_rounded, size: 18),
+                  label: const Text('Add'),
+                ),
+              ],
+            ),
+            if (_extraReminders.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Gap.sm),
+                child: Text(
+                  'None yet -- tap Add to remind yourself again at another date and time.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.inkMuted),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.only(bottom: Gap.sm),
+                child: Wrap(
+                  spacing: Gap.xs,
+                  runSpacing: Gap.xs,
+                  children: [
+                    for (final r in _extraReminders)
+                      InputChip(
+                        avatar: const Icon(Icons.notifications_active_outlined, size: 16),
+                        label: Text(DateFormat('dd/MM/yyyy, hh:mm a').format(r)),
+                        onDeleted: () => setState(() => _extraReminders.remove(r)),
+                      ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: Gap.sm),
+
             employeesAsync.when(
-              data: (employees) {
-                // The signed-in person sorts to the top of their own list,
-                // labeled "Me" instead of their own name -- assigning a
-                // task to yourself is the single most common pick here, so
-                // it shouldn't be buried wherever their name happens to
-                // fall alphabetically among everyone else in the company.
-                // Split-then-concatenate (rather than a comparator) keeps
-                // everyone else in whatever order assignableEmployeesProvider
-                // already sorted them in, since List.sort isn't stable.
-                final me = employees.where((e) => e['_id'] == currentUserId);
-                final others = employees.where((e) => e['_id'] != currentUserId);
-                final sorted = [...me, ...others];
-                return DropdownButtonFormField<String>(
-                  initialValue: _assigneeId,
-                  decoration: const InputDecoration(labelText: 'Assign to'),
-                  items: sorted
-                      .map((e) => DropdownMenuItem<String>(
-                            value: e['_id'] as String,
-                            child: Text(e['_id'] == currentUserId ? 'Me' : (e['employeeName']?.toString() ?? 'Unnamed')),
-                          ))
-                      .toList(),
-                  onChanged: (v) => setState(() => _assigneeId = v),
-                );
-              },
+              data: (employees) => SearchableEmployeeField(
+                label: 'Assign to',
+                employees: employees,
+                value: _assigneeId,
+                currentUserId: currentUserId,
+                onChanged: (v) => setState(() => _assigneeId = v),
+              ),
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),

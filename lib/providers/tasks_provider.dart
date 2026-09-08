@@ -78,6 +78,12 @@ Future<void> updateTaskDetails(
   DateTime? startDate,
   DateTime? dueDate,
   DateTime? reminderAt,
+  // null (not just an empty list) means "the Edit sheet never touched
+  // this" -- omitted from the request entirely so it's left exactly as it
+  // was on the server, same as every other untouched field here relying
+  // on the caller always passing its current value. Pass an explicit
+  // (possibly empty) list to actually replace it.
+  List<DateTime>? extraReminders,
 }) async {
   await ApiClient.instance.dio.put('/tasks/$taskId', data: {
     'name': name,
@@ -86,6 +92,8 @@ Future<void> updateTaskDetails(
     'startDate': startDate?.toUtc().toIso8601String(),
     'dueDate': dueDate?.toUtc().toIso8601String(),
     'reminderAt': reminderAt?.toUtc().toIso8601String(),
+    if (extraReminders != null)
+      'extraReminders': extraReminders.map((d) => d.toUtc().toIso8601String()).toList(),
   });
 }
 
@@ -369,7 +377,9 @@ Future<void> createTaskInSpace(
   DateTime? startDate,
   DateTime? dueDate,
   DateTime? reminderAt,
+  List<DateTime> extraReminders = const [],
   String? priority,
+  String? projectId,
 }) async {
   // .toUtc() before serializing is load-bearing: DateTime(...) built from
   // date/time pickers is in the DEVICE's local time zone, and plain
@@ -387,6 +397,9 @@ Future<void> createTaskInSpace(
     if (startDate != null) 'startDate': startDate.toUtc().toIso8601String(),
     if (dueDate != null) 'dueDate': dueDate.toUtc().toIso8601String(),
     if (reminderAt != null) 'reminderAt': reminderAt.toUtc().toIso8601String(),
+    if (extraReminders.isNotEmpty)
+      'extraReminders': extraReminders.map((d) => d.toUtc().toIso8601String()).toList(),
     if (priority != null) 'priority': priority,
+    if (projectId != null) 'projectId': projectId,
   });
 }

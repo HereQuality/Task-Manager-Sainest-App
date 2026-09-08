@@ -340,6 +340,32 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         }
       }
 
+      // Extra, plain reminders -- added from the Add/Edit Task screen's
+      // "+" next to Reminder date/time (see Task.js's extraReminders doc
+      // comment). Assignee-only (same as the alarm below), but NOT
+      // Urgent-only: any task can carry these, they just post a normal
+      // "Reminder: <task>" notification at each moment, no ring/snooze/
+      // end. Each is scheduled with a stable id derived from this task's
+      // id AND its own timestamp, so re-running this loop (every feed
+      // refresh) re-registers the exact same OS alarm instead of stacking
+      // a duplicate, and several reminders on one task never collide with
+      // each other's id.
+      if (isMine) {
+        final rawExtra = t['extraReminders'];
+        if (rawExtra is List) {
+          for (final rawWhen in rawExtra) {
+            final when = DateTime.tryParse(rawWhen.toString());
+            if (when == null || when.isBefore(now)) continue;
+            await NotificationService.instance.scheduleAt(
+              id: '${id}_extra_${when.millisecondsSinceEpoch}'.hashCode & 0x7fffffff,
+              title: 'Reminder: $title',
+              body: spaceName.isNotEmpty ? spaceName : title,
+              when: when,
+            );
+          }
+        }
+      }
+
       // The loud full-screen alarm (sound, lock-screen takeover, Snooze/
       // End) rings at reminderAt -- a date/time set independently of
       // dueDate specifically so the alarm doesn't have to match when the

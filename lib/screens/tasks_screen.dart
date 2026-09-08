@@ -133,6 +133,25 @@ String? _refId(dynamic v) {
 String? _refName(dynamic v, String nameKey) =>
     v is Map ? v[nameKey]?.toString() : null;
 
+// Whether `t` matches `q` (already lowercased) on its OWN fields --
+// mirrors TaskListView.jsx#taskMatchesSearch on the web app: name,
+// taskId, assignee, project, priority, tags. Split out to a top-level
+// function so it can be run once over every task to build the
+// "who matched directly" id set, then reused per-task inside the actual
+// .where() filter below without duplicating the field list.
+bool _taskMatchesSearchFields(Map<String, dynamic> t, String q) {
+  final haystack = [
+    t['title'],
+    t['name'],
+    t['taskId'],
+    _refName(t['assigneeId'], 'employeeName'),
+    _refName(t['projectId'], 'projectName'),
+    t['priority'],
+    ...List<String>.from(t['tags'] ?? const []),
+  ];
+  return haystack.any((v) => v != null && v.toString().toLowerCase().contains(q));
+}
+
 // One row in the grouped task list -- either a collapsible section header
 // (TO DO/IN PROGRESS/OVERDUE/COMPLETE/COMPLETE (LATE), each with its own
 // arrow toggle) or a task belonging to whichever header preceded it.
@@ -395,25 +414,35 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                 availableSpaces[sId] = sName;
             }
 
+            // Mirrors TaskListView.jsx#taskMatchesSearch's own field check
+            // -- pulled out to a top-level function (below) so it can be
+            // run once here to build directMatchIds, then reused inside
+            // the .where() below without duplicating the field list.
+            final directMatchIds = _query.isEmpty
+                ? null
+                : {
+                    for (final t in allTasks)
+                      if (_taskMatchesSearchFields(t, _query.toLowerCase()))
+                        (t['_id'] ?? '').toString()
+                  };
+
             final tasks = allTasks.where((t) {
               if (_query.isNotEmpty) {
                 final q = _query.toLowerCase();
-                // Matches everything a person might type to find a task
-                // by -- not just its name -- mirroring
-                // TaskListView.jsx#taskMatchesSearch on the web app:
-                // taskId, assignee, project, tags, priority too.
-                final haystack = [
-                  t['title'],
-                  t['name'],
-                  t['taskId'],
-                  _refName(t['assigneeId'], 'employeeName'),
-                  _refName(t['projectId'], 'projectName'),
-                  t['priority'],
-                  ...List<String>.from(t['tags'] ?? const []),
-                ];
-                final matches = haystack.any(
-                    (v) => v != null && v.toString().toLowerCase().contains(q));
-                if (!matches) return false;
+                final ownMatch = _taskMatchesSearchFields(t, q);
+                // A subtask whose PARENT matched the search on its own
+                // fields is pulled in too, even if the subtask's own name
+                // doesn't contain the search text -- same fix as the web
+                // app's TaskListView.jsx: searching a parent task's name
+                // used to only surface whichever of its subtasks happened
+                // to also contain that text in their own name, leaving the
+                // rest invisible even though they belong right there with
+                // their matched parent (see the "Subtask of ..." subtitle
+                // this screen's EntityCard now shows for exactly this).
+                final parentId = _refId(t['parentTaskId']);
+                final parentMatched =
+                    parentId != null && (directMatchIds?.contains(parentId) ?? false);
+                if (!ownMatch && !parentMatched) return false;
               }
 
               if (_dueFilter == _DueFilter.overdue) {
@@ -821,6 +850,21 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
 
                             final t = entry.task!;
                             final spaceName = t['spaceName']?.toString();
+                            // Labels a subtask row with which parent it
+                            // belongs to -- mirrors TaskListView.jsx's own
+                            // "Subtask of <parent>" tag on the web app.
+                            // Matters most for a subtask pulled into a
+                            // search result because ITS parent matched
+                            // (see _taskMatchesSearchFields above) even
+                            // though the subtask's own name doesn't --
+                            // without this it would look like an unrelated
+                            // task that matched for no visible reason.
+                            final parentName = _refName(t['parentTaskId'], 'name');
+                            final subtitleParts = [
+                              if (parentName != null && parentName.isNotEmpty)
+                                'Subtask of "$parentName"',
+                              if (spaceName != null && spaceName.isNotEmpty) spaceName,
+                            ];
                             return Padding(
                               padding: const EdgeInsets.only(bottom: Gap.sm),
                               child: EntityCard(
@@ -828,10 +872,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                                     t['title'] ?? t['name'] ?? 'Untitled task',
                                 status: _displayStatus(t),
                                 leadingIcon: Icons.task_alt_rounded,
-                                subtitle:
-                                    spaceName != null && spaceName.isNotEmpty
-                                        ? spaceName
-                                        : null,
+                                subtitle: subtitleParts.isNotEmpty
+                                    ? subtitleParts.join(' · ')
+                                    : null,
                                 // Due date, priority, and who assigned the
                                 // task to whom each get their own small
                                 // chip here (shared with every other screen

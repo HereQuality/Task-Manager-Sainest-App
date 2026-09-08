@@ -6,6 +6,7 @@ import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
 import '../providers/tasks_provider.dart';
+import 'time_picker_sheet.dart';
 
 const _priorities = ['Urgent', 'High', 'Normal', 'Low'];
 
@@ -55,6 +56,10 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
   TimeOfDay? _dueTime;
   DateTime? _reminderDate;
   TimeOfDay? _reminderTime;
+  // Extra, plain reminders -- see add_task_sheet.dart's own copy of this
+  // field for the full reasoning (kept separate from the Urgent-only
+  // overdue alarm above).
+  List<DateTime> _extraReminders = [];
   bool _saving = false;
   String? _error;
 
@@ -80,6 +85,14 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
     if (reminder != null) {
       _reminderDate = DateTime(reminder.year, reminder.month, reminder.day);
       _reminderTime = TimeOfDay(hour: reminder.hour, minute: reminder.minute);
+    }
+    final rawExtra = t['extraReminders'];
+    if (rawExtra is List) {
+      _extraReminders = rawExtra
+          .map(_parseDate)
+          .whereType<DateTime>()
+          .toList()
+        ..sort();
     }
   }
 
@@ -141,10 +154,7 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
   }
 
   Future<void> _pickDueTime() async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: _dueTime ?? TimeOfDay.now(),
-    );
+    final picked = await pickTime12h(context, initialTime: _dueTime ?? TimeOfDay.now(), title: 'Due time');
     if (picked == null) return;
     setState(() => _dueTime = picked);
   }
@@ -165,12 +175,30 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
   }
 
   Future<void> _pickReminderTime() async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: _reminderTime ?? TimeOfDay.now(),
-    );
+    final picked = await pickTime12h(context, initialTime: _reminderTime ?? TimeOfDay.now(), title: 'Reminder time');
     if (picked == null) return;
     setState(() => _reminderTime = picked);
+  }
+
+  // Same "+"-driven flow as add_task_sheet.dart's own copy.
+  Future<void> _addExtraReminder() async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final date = await showDatePicker(
+      context: context,
+      initialDate: today,
+      firstDate: today,
+      lastDate: DateTime(now.year + 5),
+    );
+    if (date == null || !mounted) return;
+    final time = await pickTime12h(context, initialTime: TimeOfDay.now(), title: 'Reminder time');
+    if (time == null) return;
+    setState(() {
+      _extraReminders = [
+        ..._extraReminders,
+        DateTime(date.year, date.month, date.day, time.hour, time.minute),
+      ]..sort();
+    });
   }
 
   Future<void> _save() async {
@@ -213,6 +241,7 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
         startDate: _startDate,
         dueDate: dueDateTime,
         reminderAt: reminderDateTime,
+        extraReminders: _extraReminders,
       );
       if (mounted) Navigator.pop(context, true);
     } on DioException catch (e) {
@@ -350,7 +379,7 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
                 Expanded(
                   child: _EditDateField(
                     label: 'Due time',
-                    value: _dueTime?.format(context),
+                    value: _dueTime == null ? null : formatTimeOfDay12h(_dueTime!),
                     onTap: _pickDueTime,
                     onClear: _dueTime == null ? null : () => setState(() => _dueTime = null),
                     icon: Icons.access_time_rounded,
@@ -399,7 +428,7 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
                 Expanded(
                   child: _EditDateField(
                     label: _priority == 'Urgent' ? 'Reminder time *' : 'Reminder time',
-                    value: _reminderTime?.format(context),
+                    value: _reminderTime == null ? null : formatTimeOfDay12h(_reminderTime!),
                     onTap: _pickReminderTime,
                     onClear: _reminderTime == null ? null : () => setState(() => _reminderTime = null),
                     icon: Icons.access_time_rounded,
@@ -415,6 +444,45 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
               ),
             ],
             const SizedBox(height: Gap.md),
+
+            // Extra reminders -- see add_task_sheet.dart's own copy of this
+            // section for the full reasoning.
+            Row(
+              children: [
+                Text('Extra reminders', style: Theme.of(context).textTheme.titleSmall),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: _addExtraReminder,
+                  icon: const Icon(Icons.add_rounded, size: 18),
+                  label: const Text('Add'),
+                ),
+              ],
+            ),
+            if (_extraReminders.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Gap.sm),
+                child: Text(
+                  'None yet -- tap Add to remind yourself again at another date and time.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.inkMuted),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.only(bottom: Gap.sm),
+                child: Wrap(
+                  spacing: Gap.xs,
+                  runSpacing: Gap.xs,
+                  children: [
+                    for (final r in _extraReminders)
+                      InputChip(
+                        avatar: const Icon(Icons.notifications_active_outlined, size: 16),
+                        label: Text(DateFormat('dd/MM/yyyy, hh:mm a').format(r)),
+                        onDeleted: () => setState(() => _extraReminders = [..._extraReminders]..remove(r)),
+                      ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: Gap.sm),
 
             employeesAsync.when(
               data: (employees) {

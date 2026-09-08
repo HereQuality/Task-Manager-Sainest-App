@@ -81,9 +81,11 @@ List<Widget> taskMetaRow(Map<String, dynamic> t, {String? currentUserId}) {
       : (refName(t['createdBy'], 'employeeName') ?? refName(t['createdBy'], 'name'));
 
   final priority = t['priority']?.toString();
+  final projectName = refName(t['projectId'], 'projectName');
 
   return [
     MetaChip(icon: Icons.event_rounded, label: dueText),
+    if (projectName != null && projectName.isNotEmpty) MetaChip(icon: Icons.folder_outlined, label: projectName),
     if (priority != null && priority.isNotEmpty) PriorityChip(priority: priority),
     if (assignedByName != null && assignedByName.isNotEmpty) MetaChip(icon: Icons.north_east_rounded, label: 'By $assignedByName'),
     if (assigneeName != null && assigneeName.isNotEmpty) MetaChip(icon: Icons.person_outline_rounded, label: 'To $assigneeName'),

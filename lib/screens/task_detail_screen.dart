@@ -260,6 +260,7 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
           // either one can legitimately be the viewer.
           final assigneeName = assigneeId != null && assigneeId == currentUserId ? 'Me' : assignee?['employeeName']?.toString();
           final priority = t['priority']?.toString();
+          final projectName = t['projectId'] is Map ? (t['projectId'] as Map)['projectName']?.toString() : null;
           final description = (t['description'] ?? '').toString();
           final dateTimeFmt = DateFormat('dd/MM/yyyy, hh:mm a');
           final startDate = _parseDate(t['startDate']);
@@ -421,6 +422,8 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
                 label: 'Priority',
                 value: priority ?? 'None',
               ),
+              if (projectName != null && projectName.isNotEmpty)
+                _DetailRow(icon: Icons.folder_outlined, label: 'Project', value: projectName),
               _DetailRow(
                 icon: Icons.play_circle_outline_rounded,
                 label: 'Start date',
