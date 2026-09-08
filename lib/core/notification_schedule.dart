@@ -207,7 +207,7 @@ class NotificationSchedule {
 NotificationSchedule? _cachedSchedule;
 DateTime? _cachedAt;
 
-/// Fetches GET /company/notification-schedule (see
+/// Fetches GET /companies/notification-schedule (see
 /// company.controller.js#getNotificationSchedule -- readable by any
 /// authenticated person, only editing it is Full-Access-gated), cached
 /// for a few minutes since this is checked on every poll (the background
@@ -222,7 +222,7 @@ Future<NotificationSchedule> fetchNotificationSchedule({bool forceRefresh = fals
     return _cachedSchedule!;
   }
   try {
-    final res = await ApiClient.instance.dio.get('/company/notification-schedule').timeout(const Duration(seconds: 8));
+    final res = await ApiClient.instance.dio.get('/companies/notification-schedule').timeout(const Duration(seconds: 8));
     final schedule = NotificationSchedule.fromJson(Map<String, dynamic>.from(res.data['data'] ?? {}));
     _cachedSchedule = schedule;
     _cachedAt = now;
