@@ -215,6 +215,21 @@ class AuthNotifier extends StateNotifier<AuthState> {
               : 'Login failed. Check your credentials.');
       state = state.copyWith(status: AuthStatus.unauthenticated, error: msg);
       return false;
+    } catch (_) {
+      // Anything past the DioException case above -- most likely the
+      // server's response not matching the shape this parses (a missing/
+      // differently-nested `data.user` or `token`) -- used to propagate
+      // all the way up through login_screen.dart's unguarded `await
+      // login(...)`, which meant its `setState(() => _loading = false)`
+      // right after that call never ran: the Log in button stayed stuck
+      // spinning forever with no error shown, indistinguishable from a
+      // hung network request. Same reasoning as _restoreSession's own
+      // generic catch above.
+      state = state.copyWith(
+        status: AuthStatus.unauthenticated,
+        error: 'Login failed. Please try again.',
+      );
+      return false;
     }
   }
 
