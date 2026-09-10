@@ -1,8 +1,23 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const _seenVersionsKey = 'task_seen_versions'; // {taskId: updatedAt-or-createdAt}
-const _initializedKey = 'task_update_tracker_initialized';
+// Scoped per-account (suffixed with currentUserId below), NOT just per
+// device -- these two keys used to be shared by every account that ever
+// signed into this device. Logging out of Person A and into Person B (or
+// a fresh install straight into an account that had ALSO been used on
+// this same device before, e.g. reinstalling over a restored backup) left
+// `_initializedKey` already true and `seen` full of Person A's task ids,
+// none of which match any of Person B's own tasks -- so every single one
+// of Person B's tasks looked brand new against that stale snapshot, and
+// _initializedKey being true (not the very first run anymore) meant
+// firstRun's silent-baseline guard below didn't apply, so ALL of that
+// person's existing tasks fired as "new" notifications the moment they
+// logged in. Suffixing both keys by whoever's actually signed in now
+// means each account gets its own clean baseline the first time it's
+// ever active on this device, and switching back to an account that
+// already has a recorded baseline picks up exactly where it left off.
+const _seenVersionsKeyPrefix = 'task_seen_versions'; // {taskId: updatedAt-or-createdAt}
+const _initializedKeyPrefix = 'task_update_tracker_initialized';
 
 class TaskChangeResult {
   final String taskId;
@@ -55,8 +70,16 @@ Future<List<TaskChangeResult>> detectTaskChanges(
 }) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
-  final firstRun = !(prefs.getBool(_initializedKey) ?? false);
-  final rawMap = prefs.getString(_seenVersionsKey);
+  // Falls back to the old unscoped keys only when currentUserId is
+  // somehow unavailable (readCurrentUserId() returning null despite an
+  // authenticated fetch having just happened, which shouldn't occur in
+  // practice) -- still better than crashing, and this device-wide
+  // fallback record only actually differs from a real account's if that
+  // edge case is ever hit.
+  final initializedKey = currentUserId != null ? '${_initializedKeyPrefix}_$currentUserId' : _initializedKeyPrefix;
+  final seenVersionsKey = currentUserId != null ? '${_seenVersionsKeyPrefix}_$currentUserId' : _seenVersionsKeyPrefix;
+  final firstRun = !(prefs.getBool(initializedKey) ?? false);
+  final rawMap = prefs.getString(seenVersionsKey);
   final seen = rawMap != null ? Map<String, dynamic>.from(jsonDecode(rawMap) as Map) : <String, dynamic>{};
   final updated = Map<String, dynamic>.from(seen);
 
@@ -104,8 +127,8 @@ Future<List<TaskChangeResult>> detectTaskChanges(
     }
   }
 
-  if (firstRun) await prefs.setBool(_initializedKey, true);
-  await prefs.setString(_seenVersionsKey, jsonEncode(updated));
+  if (firstRun) await prefs.setBool(initializedKey, true);
+  await prefs.setString(seenVersionsKey, jsonEncode(updated));
   return results;
 }
 

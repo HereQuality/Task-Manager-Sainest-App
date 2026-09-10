@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
+import '../providers/employees_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/entity_card.dart';
 import '../widgets/empty_state.dart';
@@ -189,6 +190,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   Set<String> _selectedPriorities = {};
   Set<String> _selectedTags = {};
   Set<String> _selectedAssigneeIds = {};
+  Set<String> _selectedAssignedByIds = {};
   Set<String> _selectedProjectIds = {};
   Set<String> _selectedSpaceIds = {};
   bool _dtrOnly = false;
@@ -241,6 +243,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       _selectedPriorities.length +
       _selectedTags.length +
       _selectedAssigneeIds.length +
+      _selectedAssignedByIds.length +
       _selectedProjectIds.length +
       _selectedSpaceIds.length +
       (_dtrOnly ? 1 : 0) +
@@ -254,6 +257,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       _selectedPriorities = {};
       _selectedTags = {};
       _selectedAssigneeIds = {};
+      _selectedAssignedByIds = {};
       _selectedProjectIds = {};
       _selectedSpaceIds = {};
       _dtrOnly = false;
@@ -269,6 +273,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   Future<void> _openFilterSheet({
     required List<String> availableTags,
     required Map<String, String> availableAssignees,
+    required Map<String, String> availableAssignedBy,
     required Map<String, String> availableProjects,
     required Map<String, String> availableSpaces,
   }) async {
@@ -280,12 +285,14 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       builder: (_) => _FilterSheet(
         availableTags: availableTags,
         availableAssignees: availableAssignees,
+        availableAssignedBy: availableAssignedBy,
         availableProjects: availableProjects,
         availableSpaces: availableSpaces,
         initialStatuses: _selectedStatuses,
         initialPriorities: _selectedPriorities,
         initialTags: _selectedTags,
         initialAssigneeIds: _selectedAssigneeIds,
+        initialAssignedByIds: _selectedAssignedByIds,
         initialProjectIds: _selectedProjectIds,
         initialSpaceIds: _selectedSpaceIds,
         initialDtrOnly: _dtrOnly,
@@ -300,6 +307,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         _selectedPriorities = result.priorities;
         _selectedTags = result.tags;
         _selectedAssigneeIds = result.assigneeIds;
+        _selectedAssignedByIds = result.assignedByIds;
         _selectedProjectIds = result.projectIds;
         _selectedSpaceIds = result.spaceIds;
         _dtrOnly = result.dtrOnly;
@@ -313,6 +321,13 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   @override
   Widget build(BuildContext context) {
     final tasksAsync = ref.watch(myTasksProvider);
+    // Every active employee company-wide (see assignableEmployeesProvider's
+    // own doc comment) -- Assign To/Assign By options below are built from
+    // this full roster, not from whichever assignees/creators happen to
+    // appear on the currently-loaded tasks, so all ~76 people show up in
+    // the filter sheet instead of only however many are already visible
+    // in this account's own task list.
+    final allEmployees = ref.watch(assignableEmployeesProvider).value ?? const <Map<String, dynamic>>[];
     // Best-effort: pendingApprovalsProvider failing/still-loading shouldn't
     // block the whole screen the way tasksAsync's own error/loading state
     // does below -- worst case the DELEGATED group is just empty a moment
@@ -394,18 +409,42 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             }.toList()
               ..sort();
 
-            final availableAssignees = <String, String>{};
+            // Assign To/Assign By both draw from the full company roster
+            // (allEmployees, above) rather than from allTasks -- same fix
+            // as the web app's "Assigned By" facet (TaskListView.jsx):
+            // building this from only the assignees/creators seen on
+            // whichever tasks this account can already see caps the list
+            // at however many distinct people happen to show up there,
+            // nowhere near the full ~76-person org. "Me" is pinned first
+            // (also matching the web app / the Assign to picker
+            // elsewhere in this app) since it's the most useful pick.
+            final sortedEmployees = [...allEmployees]
+              ..sort((a, b) => (a['employeeName'] ?? '')
+                  .toString()
+                  .compareTo((b['employeeName'] ?? '').toString()));
+            final meFirst = [
+              ...sortedEmployees.where((e) => e['_id'] == currentUserId),
+              ...sortedEmployees.where((e) => e['_id'] != currentUserId),
+            ];
+            final availableAssignees = <String, String>{
+              for (final e in meFirst)
+                if (e['_id'] != null)
+                  e['_id'].toString(): e['_id'] == currentUserId
+                      ? 'Me'
+                      : (e['employeeName']?.toString() ?? 'Unnamed'),
+            };
+            final availableAssignedBy = Map<String, String>.from(availableAssignees);
+
             final availableProjects = <String, String>{};
             // spaceName/spaceId are annotated onto every task by the
             // server (task.controller.js#listMyTasksAll) since this
             // screen already spans every Space the person has tasks in
             // -- same reasoning as the web app's "All Spaces" page
-            // Space facet (TaskListView.jsx).
+            // Space facet (TaskListView.jsx). Project stays task-derived
+            // too (unlike Assign To/Assign By above) -- not part of what
+            // was reported as under-counted here.
             final availableSpaces = <String, String>{};
             for (final t in allTasks) {
-              final aId = _refId(t['assigneeId']);
-              final aName = _refName(t['assigneeId'], 'employeeName');
-              if (aId != null && aName != null) availableAssignees[aId] = aName;
               final pId = _refId(t['projectId']);
               final pName = _refName(t['projectId'], 'projectName');
               if (pId != null && pName != null) availableProjects[pId] = pName;
@@ -472,6 +511,11 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               if (_selectedAssigneeIds.isNotEmpty) {
                 final id = _refId(t['assigneeId']);
                 if (id == null || !_selectedAssigneeIds.contains(id))
+                  return false;
+              }
+              if (_selectedAssignedByIds.isNotEmpty) {
+                final id = _refId(t['createdBy']);
+                if (id == null || !_selectedAssignedByIds.contains(id))
                   return false;
               }
               if (_selectedProjectIds.isNotEmpty) {
@@ -627,6 +671,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                             onPressed: () => _openFilterSheet(
                               availableTags: availableTags,
                               availableAssignees: availableAssignees,
+                              availableAssignedBy: availableAssignedBy,
                               availableProjects: availableProjects,
                               availableSpaces: availableSpaces,
                             ),
@@ -722,10 +767,18 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                         ],
                         for (final id in _selectedAssigneeIds) ...[
                           _RemovableChip(
-                            label: availableAssignees[id] ?? 'Assignee',
+                            label: availableAssignees[id] ?? 'Assign to',
                             onRemoved: () => setState(() =>
                                 _selectedAssigneeIds = {..._selectedAssigneeIds}
                                   ..remove(id)),
+                          ),
+                          const SizedBox(width: Gap.sm),
+                        ],
+                        for (final id in _selectedAssignedByIds) ...[
+                          _RemovableChip(
+                            label: availableAssignedBy[id] ?? 'Assign by',
+                            onRemoved: () => setState(() => _selectedAssignedByIds =
+                                {..._selectedAssignedByIds}..remove(id)),
                           ),
                           const SizedBox(width: Gap.sm),
                         ],
@@ -994,6 +1047,7 @@ class _FacetSelection {
   final Set<String> priorities;
   final Set<String> tags;
   final Set<String> assigneeIds;
+  final Set<String> assignedByIds;
   final Set<String> projectIds;
   final Set<String> spaceIds;
   final bool dtrOnly;
@@ -1005,6 +1059,7 @@ class _FacetSelection {
     required this.priorities,
     required this.tags,
     required this.assigneeIds,
+    required this.assignedByIds,
     required this.projectIds,
     required this.spaceIds,
     required this.dtrOnly,
@@ -1025,12 +1080,14 @@ class _FilterSheet extends StatefulWidget {
   const _FilterSheet({
     required this.availableTags,
     required this.availableAssignees,
+    required this.availableAssignedBy,
     required this.availableProjects,
     required this.availableSpaces,
     required this.initialStatuses,
     required this.initialPriorities,
     required this.initialTags,
     required this.initialAssigneeIds,
+    required this.initialAssignedByIds,
     required this.initialProjectIds,
     required this.initialSpaceIds,
     required this.initialDtrOnly,
@@ -1041,12 +1098,14 @@ class _FilterSheet extends StatefulWidget {
 
   final List<String> availableTags;
   final Map<String, String> availableAssignees;
+  final Map<String, String> availableAssignedBy;
   final Map<String, String> availableProjects;
   final Map<String, String> availableSpaces;
   final Set<String> initialStatuses;
   final Set<String> initialPriorities;
   final Set<String> initialTags;
   final Set<String> initialAssigneeIds;
+  final Set<String> initialAssignedByIds;
   final Set<String> initialProjectIds;
   final Set<String> initialSpaceIds;
   final bool initialDtrOnly;
@@ -1063,12 +1122,19 @@ class _FilterSheetState extends State<_FilterSheet> {
   late Set<String> _priorities = {...widget.initialPriorities};
   late Set<String> _tags = {...widget.initialTags};
   late Set<String> _assigneeIds = {...widget.initialAssigneeIds};
+  late Set<String> _assignedByIds = {...widget.initialAssignedByIds};
   late Set<String> _projectIds = {...widget.initialProjectIds};
   late Set<String> _spaceIds = {...widget.initialSpaceIds};
   late bool _dtrOnly = widget.initialDtrOnly;
   DateTime? _dueFrom;
   DateTime? _dueTo;
   late bool _noDueDateOnly = widget.initialNoDueDateOnly;
+  // Local, in-sheet search text for the Assign To/Assign By facets below
+  // -- with the full ~76-person roster now offered (see
+  // _TasksScreenState.build's own doc comment), scrolling to find one
+  // name isn't realistic without a way to type and narrow it down.
+  String _assigneeSearch = '';
+  String _assignedBySearch = '';
 
   @override
   void initState() {
@@ -1082,6 +1148,7 @@ class _FilterSheetState extends State<_FilterSheet> {
       _priorities.length +
       _tags.length +
       _assigneeIds.length +
+      _assignedByIds.length +
       _projectIds.length +
       _spaceIds.length +
       (_dtrOnly ? 1 : 0) +
@@ -1223,31 +1290,46 @@ class _FilterSheetState extends State<_FilterSheet> {
                     ),
                     const SizedBox(height: Gap.lg),
                     _FacetSection(
-                      title: 'Assignee',
+                      title: 'Assign to',
                       selectedCount: _assigneeIds.length,
                       child: widget.availableAssignees.isEmpty
                           ? Padding(
                               padding: const EdgeInsets.only(bottom: Gap.md),
-                              child: Text('No assignees on your tasks yet.',
+                              child: Text('No employees found.',
                                   style:
                                       Theme.of(context).textTheme.bodyMedium),
                             )
-                          : Column(
-                              children: [
-                                for (final entry
-                                    in widget.availableAssignees.entries)
-                                  CheckboxListTile(
-                                    contentPadding: EdgeInsets.zero,
-                                    controlAffinity:
-                                        ListTileControlAffinity.leading,
-                                    dense: true,
-                                    title: Text(entry.value),
-                                    value: _assigneeIds.contains(entry.key),
-                                    onChanged: (v) => setState(() => v == true
-                                        ? _assigneeIds.add(entry.key)
-                                        : _assigneeIds.remove(entry.key)),
-                                  ),
-                              ],
+                          : _FacetPersonPicker(
+                              options: widget.availableAssignees,
+                              selected: _assigneeIds,
+                              search: _assigneeSearch,
+                              onSearchChanged: (v) =>
+                                  setState(() => _assigneeSearch = v),
+                              onToggle: (id, v) => setState(() => v
+                                  ? _assigneeIds.add(id)
+                                  : _assigneeIds.remove(id)),
+                            ),
+                    ),
+                    const SizedBox(height: Gap.lg),
+                    _FacetSection(
+                      title: 'Assign by',
+                      selectedCount: _assignedByIds.length,
+                      child: widget.availableAssignedBy.isEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.only(bottom: Gap.md),
+                              child: Text('No employees found.',
+                                  style:
+                                      Theme.of(context).textTheme.bodyMedium),
+                            )
+                          : _FacetPersonPicker(
+                              options: widget.availableAssignedBy,
+                              selected: _assignedByIds,
+                              search: _assignedBySearch,
+                              onSearchChanged: (v) =>
+                                  setState(() => _assignedBySearch = v),
+                              onToggle: (id, v) => setState(() => v
+                                  ? _assignedByIds.add(id)
+                                  : _assignedByIds.remove(id)),
                             ),
                     ),
                     const SizedBox(height: Gap.lg),
@@ -1385,6 +1467,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                         priorities: _priorities,
                         tags: _tags,
                         assigneeIds: _assigneeIds,
+                        assignedByIds: _assignedByIds,
                         projectIds: _projectIds,
                         spaceIds: _spaceIds,
                         dtrOnly: _dtrOnly,
@@ -1403,6 +1486,75 @@ class _FilterSheetState extends State<_FilterSheet> {
           ),
         ),
       ),
+    );
+  }
+}
+
+// The checkbox list + a search box for one of the Assign To/Assign By
+// facets above -- both are built from the full ~76-person company
+// roster now (see _TasksScreenState.build), so typing to narrow it down
+// is the only realistic way to find one name instead of scrolling.
+class _FacetPersonPicker extends StatelessWidget {
+  const _FacetPersonPicker({
+    required this.options,
+    required this.selected,
+    required this.search,
+    required this.onSearchChanged,
+    required this.onToggle,
+  });
+
+  final Map<String, String> options;
+  final Set<String> selected;
+  final String search;
+  final ValueChanged<String> onSearchChanged;
+  final void Function(String id, bool value) onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final q = search.trim().toLowerCase();
+    final entries = q.isEmpty
+        ? options.entries.toList()
+        : options.entries
+            .where((e) => e.value.toLowerCase().contains(q))
+            .toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: Gap.xs),
+          child: TextField(
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: 'Search',
+              prefixIcon: const Icon(Icons.search_rounded, size: 18),
+              suffixIcon: search.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.close_rounded, size: 16),
+                      onPressed: () => onSearchChanged(''),
+                    ),
+            ),
+            onChanged: onSearchChanged,
+          ),
+        ),
+        if (entries.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: Gap.md),
+            child: Text('No match for "$search".',
+                style: Theme.of(context).textTheme.bodyMedium),
+          )
+        else
+          for (final entry in entries)
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+              title: Text(entry.value),
+              value: selected.contains(entry.key),
+              onChanged: (v) => onToggle(entry.key, v == true),
+            ),
+      ],
     );
   }
 }

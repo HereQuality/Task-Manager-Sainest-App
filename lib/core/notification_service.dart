@@ -44,13 +44,25 @@ const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
 /// the full-screen Alarm screen: a cold start via the full-screen-intent
 /// notification (checked in main.dart via getLaunchDetails), or the
 /// notification firing/being tapped while the app is already running (set
-/// from _handleAlarmAction below). router.dart listens to this alongside
+/// from _handleNotificationTap below). router.dart listens to this alongside
 /// auth state and redirects to /home/alarm once both are ready; the Alarm
 /// screen clears it back to null after reading it. Deliberately a plain
 /// ValueNotifier rather than a Riverpod provider -- the background
 /// isolate that can invoke this has no ProviderScope/BuildContext to
 /// reach one through.
 final pendingAlarmNotifier = ValueNotifier<Map<String, dynamic>?>(null);
+
+/// Same bridge as pendingAlarmNotifier just above, for a plain task-update
+/// notification tap (new assignment, or any change to an existing task --
+/// see showTaskUpdateNotification below) instead of the overdue alarm: a
+/// cold start via that notification (checked in main.dart via
+/// getLaunchDetails), or the tap firing while the app is already running
+/// (set from _handleNotificationTap below). router.dart listens to this
+/// alongside auth state and redirects straight to that task, the same
+/// "skip wherever the app would otherwise land" idea
+/// pendingAttachmentTaskNotifier already uses; TaskDetailScreen clears it
+/// back to null once it's the one being shown.
+final pendingTaskOpenNotifier = ValueNotifier<String?>(null);
 
 /// Wraps flutter_local_notifications. This schedules notifications that fire
 /// from the device itself at a given time (task due reminders, the overdue
@@ -474,6 +486,7 @@ class NotificationService {
         title,
         body,
         const NotificationDetails(android: _taskUpdatesChannel, iOS: DarwinNotificationDetails()),
+        payload: _taskUpdatePayload(taskId: taskId),
       );
     } catch (_) {}
   }
@@ -580,8 +593,19 @@ class NotificationService {
   // piling up duplicates.
   static int _alarmId(String taskId) => 'overdue_$taskId'.hashCode & 0x7fffffff;
 
+  // 'type': 'alarm' distinguishes this from _taskUpdatePayload below once
+  // both land in the same _handleNotificationTap callback -- a payload
+  // persisted by an OLDER build (before this field existed, e.g. one
+  // already sitting in AlarmKit's own prefs or an already-scheduled
+  // zonedSchedule) simply has no 'type' key at all, which
+  // _handleNotificationTap treats as 'alarm' too (that's ALL this payload
+  // shape was ever used for before), so an in-flight alarm survives the
+  // upgrade correctly instead of silently being misrouted.
   String _alarmPayload({required String taskId, required String taskName, required String spaceName}) =>
-      jsonEncode({'taskId': taskId, 'taskName': taskName, 'spaceName': spaceName});
+      jsonEncode({'type': 'alarm', 'taskId': taskId, 'taskName': taskName, 'spaceName': spaceName});
+
+  String _taskUpdatePayload({required String taskId}) =>
+      jsonEncode({'type': 'task_update', 'taskId': taskId});
 
   /// Fires the overdue alarm immediately -- used when a task is discovered
   /// already overdue (e.g. the app was closed when its due time passed).
@@ -881,14 +905,21 @@ class NotificationService {
 @pragma('vm:entry-point')
 void _onBackgroundNotificationResponse(NotificationResponse response) {
   WidgetsFlutterBinding.ensureInitialized();
-  _handleAlarmAction(response);
+  _handleNotificationTap(response);
 }
 
 void _onNotificationResponse(NotificationResponse response) {
-  _handleAlarmAction(response);
+  _handleNotificationTap(response);
 }
 
-Future<void> _handleAlarmAction(NotificationResponse response) async {
+// Handles a tap on ANY of this app's local notifications -- both the
+// overdue alarm (Snooze/End actions, or a plain tap routing to the Alarm
+// screen) and a plain task-update notification (new assignment / any
+// change to an existing task, see showTaskUpdateNotification), which used
+// to carry no payload at all and so just opened the app to wherever it
+// normally lands instead of the task the notification was actually about.
+// Named generically (not _handleAlarmAction) now that it covers both.
+Future<void> _handleNotificationTap(NotificationResponse response) async {
   final payload = response.payload;
   if (payload == null) return;
 
@@ -901,6 +932,20 @@ Future<void> _handleAlarmAction(NotificationResponse response) async {
 
   final taskId = data['taskId'] as String?;
   if (taskId == null) return;
+
+  // Missing 'type' means this payload predates that field, back when
+  // _alarmPayload was the only shape ever produced -- see its own doc
+  // comment.
+  final type = data['type'] as String? ?? 'alarm';
+  if (type == 'task_update') {
+    // Task-update notifications carry no actions (see _taskUpdatesChannel),
+    // so response.actionId is always null here -- straight to opening the
+    // task, same "seed the notifier, router.dart redirects" pattern the
+    // alarm case below uses for its own plain tap.
+    pendingTaskOpenNotifier.value = taskId;
+    return;
+  }
+
   final taskName = data['taskName'] as String? ?? 'Task';
   final spaceName = data['spaceName'] as String? ?? '';
 

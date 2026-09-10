@@ -310,6 +310,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
             title: 'Overdue: $title',
             body: 'Was due ${_relative(due, now)}',
             timestamp: due,
+            refId: id,
             spaceName: spaceName.isNotEmpty ? spaceName : null,
           ));
         } else if (due.difference(now).inHours <= 48) {
@@ -319,6 +320,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
             title: 'Due soon: $title',
             body: 'Due ${_relative(due, now)}',
             timestamp: due,
+            refId: id,
             spaceName: spaceName.isNotEmpty ? spaceName : null,
           ));
 
@@ -468,6 +470,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         title: title,
         body: 'Status: $status',
         timestamp: updated,
+        refId: id,
       ));
     }
   }

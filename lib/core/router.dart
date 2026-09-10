@@ -28,7 +28,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     // notification_service.dart) so the redirect below re-runs for
     // either trigger.
     refreshListenable: Listenable.merge(
-      [_AuthListenable(ref), pendingAlarmNotifier, pendingAttachmentTaskNotifier],
+      [_AuthListenable(ref), pendingAlarmNotifier, pendingAttachmentTaskNotifier, pendingTaskOpenNotifier],
     ),
     redirect: (context, state) {
       final auth = ref.read(authProvider);
@@ -54,9 +54,18 @@ final routerProvider = Provider<GoRouter>((ref) {
       // (see pending_attachment_service.dart) -- jumps straight to that
       // task instead of ever rendering Home, the same "skip the default
       // landing spot" reasoning as the alarm redirect just above.
-      final pendingTaskId = pendingAttachmentTaskNotifier.value;
-      if (pendingTaskId != null && loc != '/home/tasks/$pendingTaskId') {
-        return '/home/tasks/$pendingTaskId';
+      final pendingAttachmentTaskId = pendingAttachmentTaskNotifier.value;
+      if (pendingAttachmentTaskId != null && loc != '/home/tasks/$pendingAttachmentTaskId') {
+        return '/home/tasks/$pendingAttachmentTaskId';
+      }
+      // A tap on a plain task-update notification (new assignment, or any
+      // change to an existing task -- see notification_service.dart's
+      // showTaskUpdateNotification/pendingTaskOpenNotifier) -- same
+      // "jump straight to that task instead of Home" idea as the
+      // attachment redirect just above.
+      final pendingOpenTaskId = pendingTaskOpenNotifier.value;
+      if (pendingOpenTaskId != null && loc != '/home/tasks/$pendingOpenTaskId') {
+        return '/home/tasks/$pendingOpenTaskId';
       }
       if (loc == '/login' || loc == '/splash') return '/home';
       return null;

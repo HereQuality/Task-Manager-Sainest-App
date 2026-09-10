@@ -94,32 +94,45 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
                 final n = items[i];
                 final color = _colorFor(n.kind);
                 return Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(Gap.md),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(color: color.withOpacity(0.12), shape: BoxShape.circle),
-                          child: Icon(_iconFor(n.kind), color: color, size: 18),
-                        ),
-                        const SizedBox(width: Gap.md),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(n.title, style: Theme.of(context).textTheme.titleMedium),
-                              const SizedBox(height: 2),
-                              Text(
-                                n.spaceName != null ? '${n.body} · ${n.spaceName}' : n.body,
-                                style: Theme.of(context).textTheme.bodyMedium,
-                              ),
-                            ],
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    // A ticket update opens the ticket, everything else
+                    // (overdue/due-soon) opens the task itself -- same
+                    // destination a tap on the matching push notification
+                    // already lands on (see notification_service.dart's
+                    // showTaskUpdateNotification/pendingTaskOpenNotifier),
+                    // this just wires up the in-app feed the same way.
+                    onTap: () => context.push(
+                      n.kind == NotificationKind.ticketUpdate ? '/home/tickets/${n.refId}' : '/home/tasks/${n.refId}',
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(Gap.md),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 36,
+                            height: 36,
+                            decoration: BoxDecoration(color: color.withOpacity(0.12), shape: BoxShape.circle),
+                            child: Icon(_iconFor(n.kind), color: color, size: 18),
                           ),
-                        ),
-                      ],
+                          const SizedBox(width: Gap.md),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(n.title, style: Theme.of(context).textTheme.titleMedium),
+                                const SizedBox(height: 2),
+                                Text(
+                                  n.spaceName != null ? '${n.body} · ${n.spaceName}' : n.body,
+                                  style: Theme.of(context).textTheme.bodyMedium,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right_rounded, size: 18, color: AppColors.inkMuted),
+                        ],
+                      ),
                     ),
                   ),
                 );

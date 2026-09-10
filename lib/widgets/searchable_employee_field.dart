@@ -39,7 +39,7 @@ class SearchableEmployeeField extends StatelessWidget {
           isScrollControlled: true,
           backgroundColor: AppColors.surface,
           shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-          builder: (ctx) => _EmployeeSearchSheet(
+          builder: (ctx) => EmployeeSearchSheet(
             title: label,
             employees: employees,
             currentUserId: currentUserId,
@@ -75,12 +75,13 @@ class SearchableEmployeeField extends StatelessWidget {
   }
 }
 
-class _EmployeeSearchSheet extends StatefulWidget {
+class EmployeeSearchSheet extends StatefulWidget {
   final String title;
   final List<Map<String, dynamic>> employees;
   final String? currentUserId;
   final String? selectedId;
-  const _EmployeeSearchSheet({
+  const EmployeeSearchSheet({
+    super.key,
     required this.title,
     required this.employees,
     required this.currentUserId,
@@ -88,10 +89,10 @@ class _EmployeeSearchSheet extends StatefulWidget {
   });
 
   @override
-  State<_EmployeeSearchSheet> createState() => _EmployeeSearchSheetState();
+  State<EmployeeSearchSheet> createState() => EmployeeSearchSheetState();
 }
 
-class _EmployeeSearchSheetState extends State<_EmployeeSearchSheet> {
+class EmployeeSearchSheetState extends State<EmployeeSearchSheet> {
   final _searchCtrl = TextEditingController();
   String _query = '';
 

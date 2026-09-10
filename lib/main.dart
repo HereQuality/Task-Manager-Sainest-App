@@ -41,7 +41,19 @@ Future<void> main() async {
   final launchPayload = launchDetails?.notificationResponse?.payload;
   if (launchDetails?.didNotificationLaunchApp == true && launchPayload != null) {
     try {
-      pendingAlarmNotifier.value = jsonDecode(launchPayload) as Map<String, dynamic>;
+      final data = jsonDecode(launchPayload) as Map<String, dynamic>;
+      // Same 'type' discriminator notification_service.dart's
+      // _handleNotificationTap uses for the already-running case --
+      // missing 'type' predates that field and was always an alarm
+      // payload (see _alarmPayload's own doc comment), so this launch
+      // path stays exactly as it was for anyone mid-alarm across an
+      // app update.
+      if (data['type'] == 'task_update') {
+        final taskId = data['taskId'] as String?;
+        if (taskId != null) pendingTaskOpenNotifier.value = taskId;
+      } else {
+        pendingAlarmNotifier.value = data;
+      }
     } catch (_) {
       // Malformed/unrelated payload -- fall through to a normal launch.
     }

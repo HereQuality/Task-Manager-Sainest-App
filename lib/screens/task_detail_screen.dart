@@ -123,6 +123,18 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
         }
       });
     }
+    // Same consumed-trigger pattern, for a tap on a plain task-update
+    // notification (see notification_service.dart's
+    // pendingTaskOpenNotifier) -- clears it once this is the task that
+    // redirect actually landed on, deferred to a post-frame callback for
+    // the same "still mid-build from that very redirect" reason as above.
+    if (pendingTaskOpenNotifier.value == widget.taskId) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (pendingTaskOpenNotifier.value == widget.taskId) {
+          pendingTaskOpenNotifier.value = null;
+        }
+      });
+    }
   }
 
   Future<void> _setStatus(String status) async {

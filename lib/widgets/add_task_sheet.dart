@@ -300,23 +300,43 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             TextField(controller: _nameCtrl, decoration: const InputDecoration(labelText: 'Task')),
             const SizedBox(height: Gap.md),
 
-            spacesAsync.when(
-              data: (spaces) => DropdownButtonFormField<String>(
-                initialValue: _spaceId,
-                decoration: const InputDecoration(labelText: 'Space'),
-                items: spaces
-                    .map((s) => DropdownMenuItem<String>(
-                          value: s['_id'] as String,
-                          child: Text(s['name']?.toString() ?? 'Untitled space'),
-                        ))
-                    .toList(),
-                onChanged: (v) => setState(() => _spaceId = v),
+            // Assign To sits up here now (Space, further below, gets
+            // auto-picked the moment a person is chosen -- see
+            // onChanged) -- picking who a task is for is the more
+            // natural first step, and which Space it then lands in
+            // follows from that instead of being picked blind first.
+            employeesAsync.when(
+              data: (employees) => SearchableEmployeeField(
+                label: 'Assign to',
+                employees: employees,
+                value: _assigneeId,
+                currentUserId: currentUserId,
+                onChanged: (v) => setState(() {
+                  _assigneeId = v;
+                  // Auto-picks whichever Space this person is a member
+                  // of, same "assign them, the task lands in their own
+                  // team" idea as the web app's My Task page (see
+                  // task.controller.js#updateTask's moveToAssigneeSpace
+                  // handling) -- just applied at creation time here
+                  // instead of via a later reassignment. Left as
+                  // whatever it already was if the person isn't a
+                  // member of any Space this account can see (e.g. no
+                  // shared Space at all), or if Assign to was cleared.
+                  final spaces = spacesAsync.value;
+                  if (v != null && spaces != null) {
+                    final match = spaces.where((s) {
+                      final memberIds = s['memberIds'];
+                      return memberIds is List && memberIds.map((m) => m.toString()).contains(v);
+                    });
+                    if (match.isNotEmpty) _spaceId = match.first['_id'] as String;
+                  }
+                }),
               ),
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),
               ),
-              error: (e, _) => Text('Could not load spaces.', style: Theme.of(context).textTheme.bodyMedium),
+              error: (e, _) => Text('Could not load employees.', style: Theme.of(context).textTheme.bodyMedium),
             ),
             const SizedBox(height: Gap.md),
 
@@ -471,19 +491,37 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
               ),
             const SizedBox(height: Gap.sm),
 
-            employeesAsync.when(
-              data: (employees) => SearchableEmployeeField(
-                label: 'Assign to',
-                employees: employees,
-                value: _assigneeId,
-                currentUserId: currentUserId,
-                onChanged: (v) => setState(() => _assigneeId = v),
+            // Auto-filled the moment Assign to (above) picks someone --
+            // still shown, and still changeable by hand, since a Space is
+            // required either way and this is also the only way to set
+            // one before an assignee's been picked at all.
+            spacesAsync.when(
+              data: (spaces) => DropdownButtonFormField<String>(
+                // DropdownButtonFormField only ever reads `initialValue`
+                // once, the moment its FormFieldState is first created
+                // (same as any other FormField's initialValue -- it does
+                // NOT track a changed value across rebuilds on its own).
+                // Keying it by _spaceId forces a fresh FormFieldState
+                // whenever that changes, which is what actually makes the
+                // auto-pick above (or a plain manual re-selection) show up
+                // here instead of silently staying on the stale display
+                // while the real underlying value has already moved on.
+                key: ValueKey(_spaceId),
+                initialValue: _spaceId,
+                decoration: const InputDecoration(labelText: 'Space'),
+                items: spaces
+                    .map((s) => DropdownMenuItem<String>(
+                          value: s['_id'] as String,
+                          child: Text(s['name']?.toString() ?? 'Untitled space'),
+                        ))
+                    .toList(),
+                onChanged: (v) => setState(() => _spaceId = v),
               ),
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),
               ),
-              error: (e, _) => Text('Could not load employees.', style: Theme.of(context).textTheme.bodyMedium),
+              error: (e, _) => Text('Could not load spaces.', style: Theme.of(context).textTheme.bodyMedium),
             ),
             const SizedBox(height: Gap.xl),
 

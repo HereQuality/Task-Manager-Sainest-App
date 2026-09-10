@@ -4,10 +4,19 @@ import 'package:go_router/go_router.dart';
 import 'package:table_calendar/table_calendar.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
+import '../providers/employees_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/entity_card.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/searchable_employee_field.dart';
 import '../widgets/task_meta_chips.dart';
+
+// assigneeId comes back from /tasks/mine/all populated (a Map with _id)
+// when set -- same shape juggling as tasks_screen.dart's own _refId.
+String? _assigneeId(dynamic v) {
+  if (v is Map) return (v['_id'] ?? v['id'])?.toString();
+  return v?.toString();
+}
 
 class CalendarScreen extends ConsumerStatefulWidget {
   const CalendarScreen({super.key});
@@ -20,15 +29,70 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
   DateTime _selectedDay = DateTime.now();
   DateTime _focusedDay = DateTime.now();
 
+  // null = the default "My Task" view (see build() below, which then
+  // falls back to the logged-in user's own id). Set by picking someone
+  // in the filter sheet opened from the AppBar's filter icon.
+  String? _selectedPersonId;
+
+  Future<void> _openPersonFilter(List<Map<String, dynamic>> employees, String? currentUserId) async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => EmployeeSearchSheet(
+        title: 'View calendar for',
+        employees: employees,
+        currentUserId: currentUserId,
+        selectedId: _selectedPersonId,
+      ),
+    );
+    // Dismissed (back / tap outside) -- leave the current selection
+    // alone. The sheet's own "Clear selection" resolves with '' instead,
+    // which IS a real choice (back to the default "My Task" view).
+    if (picked == null) return;
+    setState(() => _selectedPersonId = picked.isEmpty ? null : picked);
+  }
+
   @override
   Widget build(BuildContext context) {
     final tasksAsync = ref.watch(myTasksProvider);
+    final employeesAsync = ref.watch(assignableEmployeesProvider);
     final currentUserId = ref.watch(authProvider).user?.id;
+    final employees = employeesAsync.value ?? const <Map<String, dynamic>>[];
+    final selectedPersonName = _selectedPersonId == null
+        ? null
+        : employees
+            .where((e) => e['_id'] == _selectedPersonId)
+            .map((e) => e['employeeName']?.toString())
+            .firstWhere((n) => n != null, orElse: () => 'team member');
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Calendar')),
+      appBar: AppBar(
+        title: const Text('Calendar'),
+        actions: [
+          IconButton(
+            icon: Icon(
+              Icons.filter_list_rounded,
+              color: _selectedPersonId != null ? AppColors.indigo : null,
+            ),
+            tooltip: 'View another team member\'s calendar',
+            onPressed: employeesAsync.hasValue ? () => _openPersonFilter(employees, currentUserId) : null,
+          ),
+        ],
+      ),
       body: tasksAsync.when(
-        data: (tasks) {
+        data: (allTasks) {
+          // Default (nobody picked in the filter) is "my own tasks", even
+          // for an account that can see everyone's (myTasksProvider
+          // itself already returns every task company-wide for a
+          // SuperAdmin/top-of-hierarchy account) -- the calendar only
+          // ever widens to someone else once you explicitly pick them.
+          final targetPersonId = _selectedPersonId ?? currentUserId;
+          final tasks = targetPersonId == null
+              ? allTasks
+              : allTasks.where((t) => _assigneeId(t['assigneeId']) == targetPersonId).toList();
+
           final byDay = <DateTime, List<Map<String, dynamic>>>{};
           for (final t in tasks) {
             final due = t['dueDate'];
@@ -43,6 +107,36 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
 
           return Column(
             children: [
+              if (_selectedPersonId != null)
+                Container(
+                  margin: const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, 0),
+                  padding: const EdgeInsets.symmetric(horizontal: Gap.md, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.indigoSoft,
+                    borderRadius: BorderRadius.circular(AppRadius.card),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.person_rounded, size: 16, color: AppColors.indigo),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Viewing $selectedPersonName\'s tasks',
+                          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.indigo),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => setState(() => _selectedPersonId = null),
+                        child: const Padding(
+                          padding: EdgeInsets.all(2),
+                          child: Icon(Icons.close_rounded, size: 16, color: AppColors.indigo),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               Container(
                 margin: const EdgeInsets.fromLTRB(Gap.lg, Gap.sm, Gap.lg, Gap.sm),
                 padding: const EdgeInsets.symmetric(vertical: 2),

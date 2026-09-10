@@ -68,10 +68,19 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
     return DateTime.tryParse(value.toString())?.toLocal();
   }
 
+  // Non-null only when this task IS a subtask AND its parent has its own
+  // due date -- see task.controller.js#createSubtask/updateTask, the
+  // actual authoritative "can't be later than the parent" enforcement this
+  // just mirrors in the picker (getTask now populates parentTaskId with
+  // dueDate, not just name, specifically so this can be computed here).
+  DateTime? _parentDueDate;
+
   @override
   void initState() {
     super.initState();
     final t = widget.task;
+    final parent = t['parentTaskId'];
+    if (parent is Map) _parentDueDate = _parseDate(parent['dueDate']);
     _nameCtrl = TextEditingController(text: t['name']?.toString() ?? '');
     final assignee = t['assigneeId'];
     _assigneeId = (assignee is Map ? assignee['_id'] : assignee)?.toString();
@@ -117,7 +126,14 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
     // range for showDatePicker, which asserts on that. The 5-minute edit
     // lock (server-side) is what actually stops the save on a task like
     // that, not the picker's own bounds.
-    final rawLastDate = isStart ? (_dueDate ?? DateTime(now.year + 5)) : DateTime(now.year + 5);
+    // Due date's own upper bound is the parent task's due date when this
+    // is a subtask (_parentDueDate, set in initState) -- the actual limit
+    // is enforced server-side either way (see task.controller.js#
+    // updateTask's own dueDate check), this just keeps the picker from
+    // ever offering a date guaranteed to be rejected on save.
+    final rawLastDate = isStart
+        ? (_dueDate ?? DateTime(now.year + 5))
+        : (_parentDueDate ?? DateTime(now.year + 5));
     final lastDate = rawLastDate.isBefore(firstDate) ? firstDate : rawLastDate;
     final clampedInitial = initial.isBefore(firstDate)
         ? firstDate
