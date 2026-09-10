@@ -13,6 +13,7 @@ import '../screens/task_detail_screen.dart';
 import '../screens/alarm_screen.dart';
 import '../screens/pending_approvals_screen.dart';
 import '../screens/awaiting_approval_screen.dart';
+import '../screens/approvals_hub_screen.dart';
 import '../core/notification_service.dart';
 import '../core/pending_attachment_service.dart';
 
@@ -71,6 +72,7 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(path: 'settings', builder: (context, state) => const SettingsScreen()),
           GoRoute(path: 'pending-approvals', builder: (context, state) => const PendingApprovalsScreen()),
           GoRoute(path: 'awaiting-approval', builder: (context, state) => const AwaitingApprovalScreen()),
+          GoRoute(path: 'approvals', builder: (context, state) => const ApprovalsHubScreen()),
           GoRoute(
             path: 'tickets',
             builder: (context, state) => const TicketsScreen(),

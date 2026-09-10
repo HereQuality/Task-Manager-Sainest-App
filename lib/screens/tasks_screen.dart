@@ -32,8 +32,8 @@ const _statusFacetOptions = [
   ('IN PROGRESS', 'IN PROGRESS'),
   ('DELEGATED', 'DELEGATED (Awaiting Approval)'),
   ('OVERDUE', 'OVERDUE'),
-  ('COMPLETE', 'COMPLETE'),
-  ('COMPLETE_LATE', 'COMPLETE (LATE)'),
+  ('COMPLETE', 'COMPLETED'),
+  ('COMPLETE_LATE', 'COMPLETED (LATE)'),
 ];
 const _priorityOptions = ['Urgent', 'High', 'Normal', 'Low'];
 
@@ -106,8 +106,9 @@ String _effectiveStatus(Map<String, dynamic> t) {
 String _displayStatus(Map<String, dynamic> t) {
   if (_isPendingApproval(t)) return 'DELEGATED';
   if (_isOverdue(t)) return 'OVERDUE';
-  if (_isDelayed(t)) return 'COMPLETE (LATE)';
-  return (t['status'] ?? 'pending').toString();
+  if (_isDelayed(t)) return 'COMPLETED (LATE)';
+  final raw = (t['status'] ?? 'pending').toString();
+  return raw == 'COMPLETE' ? 'COMPLETED' : raw;
 }
 
 int _compareByDueDate(Map<String, dynamic> a, Map<String, dynamic> b) {
@@ -426,7 +427,17 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                         (t['_id'] ?? '').toString()
                   };
 
-            final tasks = allTasks.where((t) {
+            // Split in two so the "All" quick-filter chip can show an
+            // accurate count of its own -- previously it always showed
+            // allTasks.length (the scope-only count), which never moved
+            // when e.g. an Assignee facet was picked in the filter sheet,
+            // even though the list itself WAS narrowing down to that
+            // person. matchesFacets covers everything except the quick
+            // Today/Upcoming/Overdue tabs themselves, so "All"'s count can
+            // be allTasks filtered by facets alone (what tapping "All"
+            // would actually show), while `tasks` below additionally
+            // applies whichever quick tab is currently selected.
+            bool matchesFacets(Map<String, dynamic> t) {
               if (_query.isNotEmpty) {
                 final q = _query.toLowerCase();
                 final ownMatch = _taskMatchesSearchFields(t, q);
@@ -443,37 +454,6 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                 final parentMatched =
                     parentId != null && (directMatchIds?.contains(parentId) ?? false);
                 if (!ownMatch && !parentMatched) return false;
-              }
-
-              if (_dueFilter == _DueFilter.overdue) {
-                // Only tasks that are actually OVERDUE right now (see
-                // _isOverdue above) -- a completed task whose due date
-                // happens to be in the past no longer belongs here, it's
-                // done.
-                if (!_isOverdue(t)) return false;
-              } else if (_dueFilter == _DueFilter.today) {
-                if (t['status'] == 'COMPLETE') return false;
-                final due = t['dueDate'];
-                // .toLocal() -- comparing y/m/d fields directly, so this
-                // has to be in the same timezone as `now` (already local).
-                // Without it, a task due today evening in a timezone ahead
-                // of UTC (e.g. IST) reads as UTC's still-yesterday date and
-                // silently drops out of "Due Today".
-                final d = due != null
-                    ? DateTime.tryParse(due.toString())?.toLocal()
-                    : null;
-                if (d == null) return false;
-                if (!(d.year == now.year &&
-                    d.month == now.month &&
-                    d.day == now.day)) return false;
-              } else if (_dueFilter == _DueFilter.upcoming) {
-                if (t['status'] == 'COMPLETE') return false;
-                final due = t['dueDate'];
-                final d =
-                    due != null ? DateTime.tryParse(due.toString()) : null;
-                if (d == null) return false;
-                if (!(d.isAfter(now) && d.difference(now).inDays <= 7))
-                  return false;
               }
 
               if (_selectedStatuses.isNotEmpty &&
@@ -520,7 +500,44 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               }
 
               return true;
-            }).toList();
+            }
+
+            bool matchesQuickDueTab(Map<String, dynamic> t) {
+              if (_dueFilter == _DueFilter.overdue) {
+                // Only tasks that are actually OVERDUE right now (see
+                // _isOverdue above) -- a completed task whose due date
+                // happens to be in the past no longer belongs here, it's
+                // done.
+                if (!_isOverdue(t)) return false;
+              } else if (_dueFilter == _DueFilter.today) {
+                if (t['status'] == 'COMPLETE') return false;
+                final due = t['dueDate'];
+                // .toLocal() -- comparing y/m/d fields directly, so this
+                // has to be in the same timezone as `now` (already local).
+                // Without it, a task due today evening in a timezone ahead
+                // of UTC (e.g. IST) reads as UTC's still-yesterday date and
+                // silently drops out of "Due Today".
+                final d = due != null
+                    ? DateTime.tryParse(due.toString())?.toLocal()
+                    : null;
+                if (d == null) return false;
+                if (!(d.year == now.year &&
+                    d.month == now.month &&
+                    d.day == now.day)) return false;
+              } else if (_dueFilter == _DueFilter.upcoming) {
+                if (t['status'] == 'COMPLETE') return false;
+                final due = t['dueDate'];
+                final d =
+                    due != null ? DateTime.tryParse(due.toString()) : null;
+                if (d == null) return false;
+                if (!(d.isAfter(now) && d.difference(now).inDays <= 7))
+                  return false;
+              }
+              return true;
+            }
+
+            final allTasksMatchingFacets = allTasks.where(matchesFacets).toList();
+            final tasks = allTasksMatchingFacets.where(matchesQuickDueTab).toList();
 
             // Grouped by effective status in a fixed priority order --
             // still-open work first (TO DO, then IN PROGRESS, then
@@ -651,7 +668,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                       children: [
                         _FilterChip(
                             label: 'All',
-                            count: allTasks.length,
+                            count: allTasksMatchingFacets.length,
                             selected: _dueFilter == _DueFilter.all,
                             onTap: () =>
                                 setState(() => _dueFilter = _DueFilter.all)),
@@ -1144,6 +1161,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                   children: [
                     _FacetSection(
                       title: 'Status',
+                      selectedCount: _statuses.length,
                       child: Column(
                         children: [
                           for (final (key, label) in _statusFacetOptions)
@@ -1164,6 +1182,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                     if (widget.availableSpaces.isNotEmpty) ...[
                       _FacetSection(
                         title: 'Space',
+                        selectedCount: _spaceIds.length,
                         child: Column(
                           children: [
                             for (final entry in widget.availableSpaces.entries)
@@ -1185,6 +1204,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                     ],
                     _FacetSection(
                       title: 'Priority',
+                      selectedCount: _priorities.length,
                       child: Column(
                         children: [
                           for (final p in _priorityOptions)
@@ -1204,6 +1224,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                     const SizedBox(height: Gap.lg),
                     _FacetSection(
                       title: 'Assignee',
+                      selectedCount: _assigneeIds.length,
                       child: widget.availableAssignees.isEmpty
                           ? Padding(
                               padding: const EdgeInsets.only(bottom: Gap.md),
@@ -1232,6 +1253,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                     const SizedBox(height: Gap.lg),
                     _FacetSection(
                       title: 'Project',
+                      selectedCount: _projectIds.length,
                       child: widget.availableProjects.isEmpty
                           ? Padding(
                               padding: const EdgeInsets.only(bottom: Gap.md),
@@ -1260,6 +1282,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                     const SizedBox(height: Gap.lg),
                     _FacetSection(
                       title: 'DTR',
+                      selectedCount: _dtrOnly ? 1 : 0,
                       child: CheckboxListTile(
                         contentPadding: EdgeInsets.zero,
                         controlAffinity: ListTileControlAffinity.leading,
@@ -1272,6 +1295,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                     const SizedBox(height: Gap.lg),
                     _FacetSection(
                       title: 'Due Date',
+                      selectedCount: (_dueFrom != null ? 1 : 0) + (_dueTo != null ? 1 : 0) + (_noDueDateOnly ? 1 : 0),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
@@ -1322,6 +1346,7 @@ class _FilterSheetState extends State<_FilterSheet> {
                     const SizedBox(height: Gap.lg),
                     _FacetSection(
                       title: 'Tags',
+                      selectedCount: _tags.length,
                       child: widget.availableTags.isEmpty
                           ? Padding(
                               padding: const EdgeInsets.only(bottom: Gap.md),
@@ -1407,8 +1432,19 @@ class _DateField extends StatelessWidget {
       child: Opacity(
         opacity: enabled ? 1 : 0.4,
         child: InputDecorator(
+          // Explicit here -- nested inside the Due Date facet's
+          // ExpansionTile, the ambient ListTileTheme (dense visual
+          // density) was compressing this decorator's reserved height,
+          // which made the floating label overlap the "Not set"/date
+          // text below it instead of sitting clearly above. Forcing the
+          // label to always float and giving it real content padding
+          // makes the layout deterministic regardless of the ambient
+          // theme it's nested in.
           decoration: InputDecoration(
             labelText: label,
+            floatingLabelBehavior: FloatingLabelBehavior.always,
+            isDense: false,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
             suffixIcon: onClear != null && enabled
                 ? IconButton(
                     icon: const Icon(Icons.close_rounded, size: 18),
@@ -1424,21 +1460,48 @@ class _DateField extends StatelessWidget {
   }
 }
 
+// Collapsed by default -- tapping the row (or its arrow) expands it. The
+// filter sheet has enough sections (Status/Space/Priority/Assignee/
+// Project/DTR/Due Date/Tags) that showing all of them open at once made
+// the sheet feel overwhelming; collapsed sections let someone jump
+// straight to the one facet they actually want to narrow down.
+// [selectedCount] keeps whatever's already picked visible as a small
+// badge even while the section itself is collapsed.
 class _FacetSection extends StatelessWidget {
-  const _FacetSection({required this.title, required this.child});
+  const _FacetSection({required this.title, required this.child, this.selectedCount = 0});
 
   final String title;
   final Widget child;
+  final int selectedCount;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(title, style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: Gap.sm),
-        child,
-      ],
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: Gap.sm),
+        title: Row(
+          children: [
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            if (selectedCount > 0) ...[
+              const SizedBox(width: Gap.sm),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                  color: AppColors.indigoSoft,
+                  borderRadius: BorderRadius.circular(AppRadius.chip),
+                ),
+                child: Text(
+                  '$selectedCount',
+                  style: const TextStyle(color: AppColors.indigo, fontWeight: FontWeight.w700, fontSize: 11.5),
+                ),
+              ),
+            ],
+          ],
+        ),
+        children: [child],
+      ),
     );
   }
 }

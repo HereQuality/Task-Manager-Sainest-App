@@ -57,6 +57,21 @@ final dashboardStatsProvider =
   return Map<String, dynamic>.from(res.data['data'] ?? {});
 });
 
+/// Every visible person's own average delay-days across their currently-
+/// overdue tasks, worst-first -- GET /api/v1/tasks/dashboard-stats/
+/// by-person (see getAverageDelayDaysByPerson in task.controller.js). A
+/// SuperAdmin/Teams-Full-Access account sees every active employee;
+/// anyone else sees only themself + their subordinates -- same visibility
+/// rule dashboardStatsProvider above already follows, resolved entirely
+/// server-side so this needs no query params. Powers the Home screen's
+/// "Average Delay Days" per-person list.
+final averageDelayDaysByPersonProvider =
+    FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
+  final res = await ApiClient.instance.dio.get('/tasks/dashboard-stats/by-person');
+  final data = res.data['data'] ?? [];
+  return List<Map<String, dynamic>>.from(data);
+});
+
 Future<void> updateTaskStatus(String taskId, String status) async {
   await ApiClient.instance.dio.put('/tasks/$taskId', data: {'status': status});
 }

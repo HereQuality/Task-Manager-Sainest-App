@@ -7,6 +7,8 @@ import '../core/pending_attachment_service.dart';
 import '../providers/auth_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/status_pill.dart';
+import '../widgets/task_meta_chips.dart';
+import '../core/task_delay.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/task_checklist_section.dart';
 import '../widgets/task_subtasks_section.dart';
@@ -15,6 +17,10 @@ import '../widgets/task_comments_section.dart';
 import '../widgets/edit_task_sheet.dart';
 
 const _statuses = ['TO DO', 'IN PROGRESS', 'COMPLETE'];
+
+// Display-only relabel -- the raw 'COMPLETE' status value (used for every
+// comparison/API call) reads as "COMPLETED" wherever it's shown to the user.
+String _statusDisplayLabel(String s) => s == 'COMPLETE' ? 'COMPLETED' : s;
 
 /// Opened by tapping a task anywhere in the app -- the Tasks tab, Home's
 /// "Due soon" list, or a day's tasks on the Calendar tab all push here
@@ -266,6 +272,19 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
           final startDate = _parseDate(t['startDate']);
           final dueDate = _parseDate(t['dueDate']);
           final reminderAt = _parseDate(t['reminderAt']);
+          // Distinct from reminderAt above (the single alarm date/time) --
+          // extraReminders is the list added via the "+ Add reminder"
+          // button (web's TaskDetailModal.jsx, once Urgent; mobile's own
+          // edit sheet). Each one rings the same full-screen alarm
+          // independently (see background_watcher_service.dart's
+          // _checkExtraRemindersOnce) -- shown here too so this screen
+          // doesn't read "Not set" when reminders actually exist, just
+          // under a different field.
+          final extraReminders = ((t['extraReminders'] as List?) ?? const [])
+              .map((raw) => _parseDate(raw))
+              .whereType<DateTime>()
+              .toList()
+            ..sort();
           final completedAt = _parseDate(t['completedAt']);
           final spaceName = t['spaceName']?.toString();
           final folderName = t['folderName']?.toString();
@@ -308,9 +327,20 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
                     onPressed: () => showEditTaskSheet(context, ref, t),
                     visualDensity: VisualDensity.compact,
                   ),
-                  StatusPill(status: pendingApproval ? 'DELEGATED' : status),
+                  StatusPill(status: pendingApproval ? 'DELEGATED' : _statusDisplayLabel(status)),
                 ],
               ),
+              Builder(builder: (context) {
+                final delayDays = taskDaysLate(t);
+                if (delayDays <= 0) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: Gap.xs),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: DelayChip(days: delayDays, isCompletedLate: status == 'COMPLETE'),
+                  ),
+                );
+              }),
               if (spaceName != null && spaceName.isNotEmpty) ...[
                 const SizedBox(height: Gap.xs),
                 Text(
@@ -390,7 +420,7 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
                   children: _statuses.map((s) {
                     final selected = s == status;
                     return ChoiceChip(
-                      label: Text(s),
+                      label: Text(_statusDisplayLabel(s)),
                       selected: selected,
                       onSelected: _updating || selected ? null : (_) => _setStatus(s),
                       selectedColor: AppColors.indigo,
@@ -408,7 +438,7 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
                   FilledButton.icon(
                     onPressed: _updating ? null : () => _setStatus('COMPLETE'),
                     icon: const Icon(Icons.check_circle_outline_rounded, size: 18),
-                    label: const Text('Mark complete'),
+                    label: const Text('Mark completed'),
                   ),
                 ],
               ],
@@ -450,6 +480,12 @@ class _TaskDetailBodyState extends ConsumerState<_TaskDetailBody> {
                 label: 'Reminder (alarm)',
                 value: reminderAt != null ? dateTimeFmt.format(reminderAt) : 'Not set',
               ),
+              if (extraReminders.isNotEmpty)
+                _DetailRow(
+                  icon: Icons.notifications_active_outlined,
+                  label: 'Extra reminders',
+                  value: extraReminders.map(dateTimeFmt.format).join(', '),
+                ),
               if (completedAt != null)
                 _DetailRow(
                   icon: Icons.task_alt_rounded,

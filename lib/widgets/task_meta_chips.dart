@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../core/theme.dart';
+import '../core/task_delay.dart';
 
 /// Shared DD/MM/YYYY due-date format for task rows -- used wherever a task
 /// row appears (Tasks screen, Home's Today's tasks) so the format stays
@@ -54,6 +55,35 @@ class PriorityChip extends StatelessWidget {
   }
 }
 
+/// "Delayed by Nd" badge for an overdue or completed-late task -- red
+/// while still open (an active problem), amber once it's COMPLETE but
+/// finished late (a closed, historical fact). Same metaRow slot as the
+/// other chips; only rendered by taskMetaRow below when taskDaysLate(t)
+/// is actually > 0, so an on-time or not-yet-due task never shows one.
+class DelayChip extends StatelessWidget {
+  final int days;
+  final bool isCompletedLate;
+  const DelayChip({super.key, required this.days, required this.isCompletedLate});
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = isCompletedLate ? AppColors.warning : AppColors.danger;
+    final bg = isCompletedLate ? AppColors.warningSoft : AppColors.dangerSoft;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(AppRadius.chip)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.hourglass_bottom_rounded, size: 12, color: fg),
+          const SizedBox(width: 3),
+          Text('$days d late', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: fg, fontWeight: FontWeight.w700)),
+        ],
+      ),
+    );
+  }
+}
+
 /// Builds the standard metaRow (due date, priority, assigned-by,
 /// assigned-to) for a task Map straight off the API -- shared so every
 /// screen's task row shows exactly the same chips in the same order.
@@ -82,9 +112,11 @@ List<Widget> taskMetaRow(Map<String, dynamic> t, {String? currentUserId}) {
 
   final priority = t['priority']?.toString();
   final projectName = refName(t['projectId'], 'projectName');
+  final delayDays = taskDaysLate(t);
 
   return [
     MetaChip(icon: Icons.event_rounded, label: dueText),
+    if (delayDays > 0) DelayChip(days: delayDays, isCompletedLate: t['status']?.toString() == 'COMPLETE'),
     if (projectName != null && projectName.isNotEmpty) MetaChip(icon: Icons.folder_outlined, label: projectName),
     if (priority != null && priority.isNotEmpty) PriorityChip(priority: priority),
     if (assignedByName != null && assignedByName.isNotEmpty) MetaChip(icon: Icons.north_east_rounded, label: 'By $assignedByName'),

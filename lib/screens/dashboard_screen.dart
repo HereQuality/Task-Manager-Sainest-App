@@ -36,9 +36,19 @@ class DashboardScreen extends ConsumerWidget {
     final user = ref.watch(authProvider).user;
     final statsAsync = ref.watch(dashboardStatsProvider);
     final tasksAsync = ref.watch(myTasksProvider);
+    final delayByPersonAsync = ref.watch(averageDelayDaysByPersonProvider);
     final unread = ref
         .watch(unreadNotificationCountProvider)
         .maybeWhen(data: (n) => n, orElse: () => 0);
+    // Badge count for the new Approvals card below -- everything currently
+    // needing a look either direction: requests waiting on THIS person to
+    // approve (completion + lock-override requests combined, same merge
+    // PendingApprovalsScreen itself does) plus this person's own submitted
+    // completions still waiting on someone else.
+    final int pendingCount = ref.watch(pendingApprovalsProvider).maybeWhen<int>(data: (l) => l.length, orElse: () => 0) +
+        ref.watch(lockOverrideRequestsProvider).maybeWhen<int>(data: (l) => l.length, orElse: () => 0);
+    final int awaitingCount = ref.watch(mySubmittedApprovalsProvider).maybeWhen<int>(data: (l) => l.length, orElse: () => 0);
+    final int approvalsCount = pendingCount + awaitingCount;
 
     return Scaffold(
       appBar: AppBar(
@@ -102,41 +112,86 @@ class DashboardScreen extends ConsumerWidget {
                 final otcPct = onTimeJudgedTotal > 0
                     ? (onTimeCompletion / onTimeJudgedTotal) * 100
                     : 0;
+                // Just this person's own average overdue delay -- same
+                // self-scoping as the card below, sourced from the same
+                // per-person provider (see averageDelayDaysByPersonProvider).
+                final myDelay = delayByPersonAsync.maybeWhen<Map<String, dynamic>?>(
+                  data: (people) {
+                    final matches = people.where((p) => p['employeeId']?.toString() == user?.id);
+                    return matches.isEmpty ? null : matches.first;
+                  },
+                  orElse: () => null,
+                );
+                final myAvgOverdueDelay = ((myDelay?['avgDelayDays'] as num?) ?? 0).toDouble();
+                // Ring fill is only meaningful on a 0-100 scale -- days late
+                // isn't one, so this caps the fill at a 14-day "fully red"
+                // ring purely for the visual, while the exact day count
+                // still shows as the center text regardless.
+                final overdueDelayRingPct = (myAvgOverdueDelay / 14 * 100).clamp(0, 100);
 
                 return Column(
                   children: [
-                    // ATS/OTC are the two headline performance scores, not
-                    // just another count like the cards below -- a distinct
-                    // "hero" ring treatment up top is what makes them read
-                    // as the numbers to check first, before the raw
-                    // task-count breakdown underneath.
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _ScoreRingCard(
-                            label: 'ATS Score',
-                            pct: atsScore.toDouble(),
-                            color: AppColors.indigo,
+                    // ATS/OTC/Average Overdue Delay are the headline
+                    // performance numbers, not just another count like the
+                    // cards below -- a distinct "hero" ring treatment up top
+                    // is what makes them read as the numbers to check first,
+                    // before the raw task-count breakdown underneath.
+                    // IntrinsicHeight -- required for crossAxisAlignment.stretch
+                    // to work safely here. This Row sits inside a Column
+                    // inside a ListView, which gives it an UNBOUNDED height
+                    // constraint; stretch alone would try to stretch its
+                    // children to that unbounded height, which silently
+                    // breaks layout for the rest of the page (a known
+                    // Flutter footgun -- release builds strip the assertion
+                    // that would normally catch it in debug, so the failure
+                    // just shows up as everything below this Row vanishing).
+                    // IntrinsicHeight first computes a real, finite height
+                    // from the children themselves, then stretch works
+                    // against that instead.
+                    IntrinsicHeight(
+                      child: Row(
+                        // Stretch -- without this, each card sizes to its own
+                        // label's intrinsic height, and "ATS Score" (one
+                        // line) ends up visibly shorter than the two-line
+                        // labels beside it. Stretching makes all three match
+                        // the tallest card's height.
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: _ScoreRingCard(
+                              label: 'ATS Score',
+                              pct: atsScore.toDouble(),
+                              color: AppColors.indigo,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: Gap.md),
-                        Expanded(
-                          child: _ScoreRingCard(
-                            label: 'On-Time Completion',
-                            pct: otcPct.toDouble(),
-                            color: AppColors.success,
+                          const SizedBox(width: Gap.sm),
+                          Expanded(
+                            child: _ScoreRingCard(
+                              label: 'On-Time Completed',
+                              pct: otcPct.toDouble(),
+                              color: AppColors.success,
+                            ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(width: Gap.sm),
+                          Expanded(
+                            child: _ScoreRingCard(
+                              label: 'Average Overdue Delay',
+                              pct: overdueDelayRingPct.toDouble(),
+                              color: AppColors.danger,
+                              centerText: myAvgOverdueDelay > 0 ? '${myAvgOverdueDelay.toStringAsFixed(1)}d' : '—',
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                     const SizedBox(height: Gap.md),
                     GridView.count(
                       shrinkWrap: true,
                       physics: const NeverScrollableScrollPhysics(),
-                      crossAxisCount: 2,
-                      mainAxisSpacing: Gap.md,
-                      crossAxisSpacing: Gap.md,
-                      childAspectRatio: 1.5,
+                      crossAxisCount: 3,
+                      mainAxisSpacing: Gap.sm,
+                      crossAxisSpacing: Gap.sm,
+                      childAspectRatio: 1.15,
                       children: [
                         _StatCard(
                           label: 'Total tasks',
@@ -146,7 +201,7 @@ class DashboardScreen extends ConsumerWidget {
                           onTap: () => _openTasksFiltered(const {}),
                         ),
                         _StatCard(
-                          label: 'On time completion',
+                          label: 'On time completed',
                           value: '${onTimeCompletion.toInt()}',
                           color: AppColors.success,
                           icon: Icons.check_circle_outline_rounded,
@@ -173,6 +228,13 @@ class DashboardScreen extends ConsumerWidget {
                           icon: Icons.hourglass_bottom_rounded,
                           onTap: () => _openTasksFiltered(const {'COMPLETE_LATE'}),
                         ),
+                        _StatCard(
+                          label: 'Approvals',
+                          value: '$approvalsCount',
+                          color: AppColors.indigo,
+                          icon: Icons.pending_actions_rounded,
+                          onTap: () => context.push('/home/approvals'),
+                        ),
                       ],
                     ),
                   ],
@@ -188,7 +250,23 @@ class DashboardScreen extends ConsumerWidget {
                     style: Theme.of(context).textTheme.bodyMedium),
               ),
             ),
-            const SizedBox(height: Gap.xl),
+            const SizedBox(height: Gap.md),
+            delayByPersonAsync.when(
+              // Just this person's own row -- not the whole team's, see
+              // approvals-style per-person breakdown for that (this screen
+              // used to list everyone; kept small and self-scoped now so it
+              // doesn't push "Today's tasks" further down the page).
+              data: (people) {
+                final mine = people.where((p) => p['employeeId']?.toString() == user?.id).toList();
+                if (mine.isEmpty) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: Gap.md),
+                  child: _MyDelayCard(person: mine.first),
+                );
+              },
+              loading: () => const SizedBox.shrink(),
+              error: (e, _) => const SizedBox.shrink(),
+            ),
             Text("Today's tasks",
                 style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: Gap.md),
@@ -262,6 +340,54 @@ class DashboardScreen extends ConsumerWidget {
   }
 }
 
+/// Compact single-line card showing just the logged-in person's own average
+/// COMPLETED delay, in days -- across their own tasks that were actually
+/// finished late, not still-open overdue ones (see the ring above for
+/// that). Server-computed, see getAverageDelayDaysByPerson's
+/// avgCompletedDelayDays in task.controller.js -- same task-weighted
+/// averaging the web Dashboard's own "Average Completed Delay Days" card
+/// uses. Deliberately small -- one row, not a list -- so it doesn't push
+/// "Today's tasks" further down the Home screen.
+class _MyDelayCard extends StatelessWidget {
+  final Map<String, dynamic> person;
+  const _MyDelayCard({required this.person});
+
+  @override
+  Widget build(BuildContext context) {
+    final delayedCount = ((person['delayedCount'] as num?) ?? 0).toInt();
+    if (delayedCount == 0) return const SizedBox.shrink();
+    final avgCompletedDelayDays = ((person['avgCompletedDelayDays'] as num?) ?? 0).toDouble();
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Gap.md, vertical: Gap.sm),
+        child: Row(
+          children: [
+            Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(color: AppColors.warningSoft, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.hourglass_bottom_rounded, color: AppColors.warning, size: 16),
+            ),
+            const SizedBox(width: Gap.sm),
+            Expanded(
+              child: Text(
+                'Avg. completed delay: $delayedCount task${delayedCount == 1 ? '' : 's'}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+            Text(
+              '${avgCompletedDelayDays.toStringAsFixed(1)}d',
+              style: const TextStyle(color: AppColors.warning, fontWeight: FontWeight.w800, fontSize: 14),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Headline performance card for ATS/OTC -- a circular progress ring with
 /// the percentage inside, instead of the plain icon+value+label tile the
 /// other stats below use. Deliberately a different shape (not just a
@@ -271,56 +397,69 @@ class _ScoreRingCard extends StatelessWidget {
   final String label;
   final double pct;
   final Color color;
-  const _ScoreRingCard({required this.label, required this.pct, required this.color});
+  // Overrides the "N%" text drawn in the ring's center -- used by the
+  // Average Overdue Delay ring (days, not a percentage) alongside ATS/OTC.
+  // [pct] still drives how much of the ring fills in, so callers that pass
+  // it must pre-scale a non-percentage value onto a 0-100 range themselves.
+  final String? centerText;
+  const _ScoreRingCard({required this.label, required this.pct, required this.color, this.centerText});
 
   @override
   Widget build(BuildContext context) {
     final clamped = pct.clamp(0, 100) / 100;
+    // Shrunk from 76 -- three of these now sit side by side (ATS / OTC /
+    // Average Overdue Delay) instead of the original two, so each needs to
+    // give up some width to fit a phone screen without wrapping.
+    const size = 64.0;
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: Gap.lg, horizontal: Gap.md),
+        padding: const EdgeInsets.symmetric(vertical: Gap.md, horizontal: Gap.sm),
         child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             SizedBox(
-              width: 76,
-              height: 76,
+              width: size,
+              height: size,
               child: Stack(
                 alignment: Alignment.center,
                 children: [
                   SizedBox(
-                    width: 76,
-                    height: 76,
+                    width: size,
+                    height: size,
                     child: CircularProgressIndicator(
                       value: 1,
-                      strokeWidth: 7,
+                      strokeWidth: 6,
                       color: color.withValues(alpha: 0.12),
                     ),
                   ),
                   SizedBox(
-                    width: 76,
-                    height: 76,
+                    width: size,
+                    height: size,
                     child: CircularProgressIndicator(
                       value: clamped.toDouble(),
-                      strokeWidth: 7,
+                      strokeWidth: 6,
                       color: color,
                       strokeCap: StrokeCap.round,
                     ),
                   ),
-                  Text(
-                    '${pct.toStringAsFixed(0)}%',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(color: color, fontWeight: FontWeight.w800),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      centerText ?? '${pct.toStringAsFixed(0)}%',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(color: color, fontWeight: FontWeight.w800),
+                    ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: Gap.sm),
+            const SizedBox(height: Gap.xs),
             Text(
               label,
               textAlign: TextAlign.center,
-              maxLines: 1,
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w700),
             ),
           ],
         ),
@@ -349,18 +488,18 @@ class _StatCard extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.all(Gap.lg),
+          padding: const EdgeInsets.all(Gap.sm),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Container(
-                width: 32,
-                height: 32,
+                width: 26,
+                height: 26,
                 decoration: BoxDecoration(
                     color: color.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(9)),
-                child: Icon(icon, color: color, size: 17),
+                    borderRadius: BorderRadius.circular(8)),
+                child: Icon(icon, color: color, size: 14),
               ),
               // This card's height is fixed by the parent GridView's
               // childAspectRatio, not sized to content -- maxLines/ellipsis

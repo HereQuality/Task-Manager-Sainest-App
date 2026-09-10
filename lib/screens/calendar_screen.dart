@@ -140,7 +140,7 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
                           final spaceName = t['spaceName']?.toString();
                           return EntityCard(
                             title: t['title'] ?? t['name'] ?? 'Untitled task',
-                            status: t['status'] ?? 'pending',
+                            status: t['status'] == 'COMPLETE' ? 'COMPLETED' : (t['status'] ?? 'pending'),
                             leadingIcon: Icons.task_alt_rounded,
                             subtitle: spaceName != null && spaceName.isNotEmpty ? spaceName : null,
                             // Same chip set every other task row in the

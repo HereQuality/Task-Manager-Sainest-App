@@ -411,25 +411,36 @@ class NotificationService {
   static const _morningDigestId = 90001;
   static const _eveningDigestId = 90002;
 
+  // Android collapses a notification's body to a single truncated line by
+  // default -- BigTextStyleInformation is what makes pulling down/
+  // expanding it actually reveal the FULL text instead of still cutting
+  // it off with "..." (a plain body string, however long, always renders
+  // single-line-truncated without this, expanded or not). Every digest
+  // body is built from a real, varying task count/list, so this can't be
+  // the same `const NotificationDetails` used elsewhere -- it's
+  // reconstructed per call with _digestChannel's other settings copied
+  // over, styleInformation added on top.
+  NotificationDetails _digestDetails(String title, String body) => NotificationDetails(
+        android: AndroidNotificationDetails(
+          _digestChannel.channelId,
+          _digestChannel.channelName,
+          channelDescription: _digestChannel.channelDescription,
+          importance: _digestChannel.importance,
+          priority: _digestChannel.priority,
+          styleInformation: BigTextStyleInformation(body, contentTitle: title),
+        ),
+        iOS: const DarwinNotificationDetails(),
+      );
+
   Future<void> showMorningDigest({required String title, required String body}) async {
     try {
-      await _plugin.show(
-        _morningDigestId,
-        title,
-        body,
-        const NotificationDetails(android: _digestChannel, iOS: DarwinNotificationDetails()),
-      );
+      await _plugin.show(_morningDigestId, title, body, _digestDetails(title, body));
     } catch (_) {}
   }
 
   Future<void> showEveningDigest({required String title, required String body}) async {
     try {
-      await _plugin.show(
-        _eveningDigestId,
-        title,
-        body,
-        const NotificationDetails(android: _digestChannel, iOS: DarwinNotificationDetails()),
-      );
+      await _plugin.show(_eveningDigestId, title, body, _digestDetails(title, body));
     } catch (_) {}
   }
 

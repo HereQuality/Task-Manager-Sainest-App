@@ -34,6 +34,17 @@ const _alertedApprovalIdsKey = 'approval_alerted_task_ids';
 // was already handled and never bring the alarm back through this (the
 // reliable) path once the snooze window passed.
 const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
+// Per-(taskId, reminder instant) -- deliberately NOT shared with
+// _alertedOverdueIdsKey above. That key tracks a single ongoing
+// condition per task ("is it still overdue right now"), which is exactly
+// right for one due date but wrong here: a task can carry SEVERAL extra
+// reminders at different times (Task.js's extraReminders, added from the
+// web/mobile "Add reminder" UI once a task is Urgent), and each one needs
+// its own independent "have I already rung this specific instant" record
+// -- otherwise ringing the 9am reminder would permanently suppress the
+// 3pm one too, since the task's overall "has an extra reminder passed"
+// state never goes false again on its own.
+const _alertedExtraReminderIdsKey = 'extra_reminder_alerted_ids';
 // businessDayKeyFor(...) of the last day a digest was actually sent --
 // compared against today's key so the 5-minute detection window in
 // isWithinOfficeStartWindow/isWithinOfficeEndWindow can't send more than
@@ -260,6 +271,7 @@ Future<void> _runTick() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
     await _checkOverdueTasksOnce(tasks, schedule, prefs);
+    await _checkExtraRemindersOnce(tasks, schedule, prefs);
     await _checkTaskUpdatesOnce(tasks, schedule, prefs);
     await _checkTeamEscalationsOnce(schedule, prefs);
     await _checkPendingApprovalsOnce(schedule, prefs);
@@ -384,6 +396,68 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
   // different moments shouldn't be able to erase each other's "already
   // alerted" record for a task the other one is the one that saw.
   await prefs.setStringList(_alertedOverdueIdsKey, {...alertedIds, ...stillOverdueIds}.toList());
+}
+
+// Full-screen alarm catch-up for Task.js's extraReminders -- the same
+// loud, lock-screen-taking-over ring _checkOverdueTasksOnce fires for a
+// task's own due date, just triggered by any of its extra reminder
+// moments passing instead. Deliberately reuses
+// NotificationService.showOverdueAlarmNow AS-IS (same task-scoped alarm
+// id/notification, unmodified) rather than minting a reminder-specific
+// one -- Snooze/End on the resulting Alarm screen (alarm_screen.dart)
+// only know how to snooze/cancel that one task-scoped id, so reusing it
+// is what makes Snooze/End already work correctly here with zero changes
+// to that screen or to notification_service.dart.
+Future<void> _checkExtraRemindersOnce(List<Map<String, dynamic>> tasks, NotificationSchedule schedule, SharedPreferences prefs) async {
+  final alertedInstantKeys = (prefs.getStringList(_alertedExtraReminderIdsKey) ?? []).toSet();
+  final stillPendingKeys = <String>{};
+  final now = DateTime.now();
+  var firedCount = 0;
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+
+  for (final t in tasks) {
+    final status = (t['status'] ?? '').toString().toLowerCase();
+    if (status.contains('complete') || status.contains('done')) continue;
+
+    // Same Urgent+assignee-only gate as the due-date alarm above -- extra
+    // reminders can only be added to a task once it's Urgent in the first
+    // place (see TaskDetailModal.jsx/edit_task_sheet.dart), so this just
+    // mirrors that at the ringing end too.
+    if ((t['priority'] ?? '').toString() != 'Urgent') continue;
+    final assigneeIdRaw = t['assigneeId'];
+    final taskAssigneeId = (assigneeIdRaw is Map ? assigneeIdRaw['_id'] : assigneeIdRaw)?.toString();
+    if (taskAssigneeId == null || taskAssigneeId != currentUserId) continue;
+
+    final extraRaw = t['extraReminders'];
+    if (extraRaw is! List || extraRaw.isEmpty) continue;
+
+    final title = (t['title'] ?? t['name'] ?? 'Untitled task').toString();
+    final id = (t['_id'] ?? t['id'] ?? title).toString();
+    final spaceName = (t['spaceName'] ?? '').toString();
+
+    for (final rawWhen in extraRaw) {
+      final when = DateTime.tryParse(rawWhen.toString());
+      if (when == null || !when.isBefore(now)) continue;
+
+      final instantKey = '$id::${when.toUtc().toIso8601String()}';
+      if (!schedule.isWithinWindow(now)) {
+        // Outside the notification window -- left out of stillPendingKeys,
+        // same reasoning as the due-date alarm's own deferral above, so a
+        // later tick once back inside the window still catches it.
+        continue;
+      }
+      stillPendingKeys.add(instantKey);
+
+      if (!alertedInstantKeys.contains(instantKey)) {
+        firedCount++;
+        print('[WATCHER] firing extra-reminder alarm for taskId=$id "$title" reminderAt=$when (now=$now)');
+        await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
+      }
+    }
+  }
+
+  print('[WATCHER] extra reminder check: $firedCount alarm(s) fired this tick');
+  await prefs.setStringList(_alertedExtraReminderIdsKey, {...alertedInstantKeys, ...stillPendingKeys}.toList());
 }
 
 // "Compulsory" per-task notifications (new assignment, or any edit) --
