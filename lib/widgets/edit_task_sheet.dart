@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +7,7 @@ import 'package:intl/intl.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
+import '../providers/notifications_provider.dart';
 import '../providers/tasks_provider.dart';
 import 'time_picker_sheet.dart';
 
@@ -259,6 +262,22 @@ class _EditTaskSheetContentState extends ConsumerState<_EditTaskSheetContent> {
         reminderAt: reminderDateTime,
         extraReminders: _extraReminders,
       );
+      // notificationsFeedProvider (not this sheet) is what actually calls
+      // NotificationService.scheduleAt/scheduleOverdueAlarmAt for a task's
+      // reminderAt/extraReminders -- but it's FutureProvider.autoDispose
+      // and only watched by the Notifications screen, so without this a
+      // reminder just set here did nothing on-device until the person
+      // happened to open that screen. Android masks this gap (a happy
+      // accident, not by design): background_watcher_service.dart's once-
+      // a-minute poll picks up the same server-side change independently
+      // within a minute regardless of what's on screen. iOS has no such
+      // poller (see CLAUDE.md), so this was the ONLY path to ever
+      // schedule it there. Invalidating myTasksProvider first ensures the
+      // feed rebuild actually sees this save's new reminder instead of a
+      // stale cached task list; ref.read(...future) (not watch) runs the
+      // scheduling once without leaving this disposed sheet subscribed.
+      ref.invalidate(myTasksProvider);
+      unawaited(ref.read(notificationsFeedProvider.future));
       if (mounted) Navigator.pop(context, true);
     } on DioException catch (e) {
       // Surfaces the server's own message as-is (e.g. "This task was

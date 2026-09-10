@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
+import '../providers/notifications_provider.dart';
 import '../providers/projects_provider.dart';
 import '../providers/spaces_provider.dart';
 import '../providers/tasks_provider.dart';
@@ -82,6 +85,14 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
   }
   ref.invalidate(myTasksProvider);
   ref.invalidate(dashboardStatsProvider);
+  // See edit_task_sheet.dart's identical call for why this is needed:
+  // notificationsFeedProvider is the only place a reminderAt/extraReminders
+  // actually gets scheduled on-device, and it's autoDispose -- only run
+  // while the Notifications screen is open. Without forcing it here, a
+  // brand-new task's reminder would silently do nothing until that screen
+  // happened to be visited (iOS has no background poller to catch it
+  // otherwise, unlike Android's background_watcher_service.dart).
+  unawaited(ref.read(notificationsFeedProvider.future));
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Task added')));
   }
