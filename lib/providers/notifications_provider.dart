@@ -197,9 +197,25 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     final escalations = await fetchTeamOverdueEscalations();
     final alertedEscalationIds = await _loadAlertedEscalationIds();
     final stillEscalatedIds = <String>{};
+    // See consumeFirstRunBaseline's doc comment: without this, every
+    // already-1-day-overdue report's task on a brand new device (or a
+    // never-before-seen account on this one) would fire as a fresh "Team
+    // overdue" alert the instant this ran, instead of just the ones that
+    // become newly escalated from here on. legacyDataExists read before
+    // _saveAlertedEscalationIds below writes to this key this tick.
+    final escalationPrefs = await SharedPreferences.getInstance();
+    final isFirstRun = await consumeFirstRunBaseline(
+      'escalation',
+      currentUserId,
+      legacyDataExists: escalationPrefs.containsKey(_alertedEscalationIdsKey),
+    );
     for (final t in escalations) {
       final id = (t['_id'] ?? '').toString();
       if (id.isEmpty) continue;
+      if (isFirstRun) {
+        stillEscalatedIds.add(id);
+        continue;
+      }
       final alreadyAlerted = alertedEscalationIds.contains(id);
       // Once genuinely alerted, stays recorded as alerted regardless of
       // the notification window -- only a NOT-yet-alerted one is left
@@ -230,9 +246,21 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     final approvals = await fetchPendingApprovals();
     final alertedApprovalIds = await _loadAlertedApprovalIds();
     final stillPendingIds = <String>{};
+    // See consumeFirstRunBaseline's doc comment / the matching guard on
+    // the escalations block above.
+    final approvalPrefs = await SharedPreferences.getInstance();
+    final isFirstRunApprovals = await consumeFirstRunBaseline(
+      'approval',
+      currentUserId,
+      legacyDataExists: approvalPrefs.containsKey(_alertedApprovalIdsKey),
+    );
     for (final t in approvals) {
       final id = (t['_id'] ?? '').toString();
       if (id.isEmpty) continue;
+      if (isFirstRunApprovals) {
+        stillPendingIds.add(id);
+        continue;
+      }
       final alreadyAlerted = alertedApprovalIds.contains(id);
       // Same "stays recorded once genuinely alerted, otherwise left
       // pending while suppressed" reasoning as the team-escalations loop
@@ -258,8 +286,20 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     // _alertedOverdueIdsKey doc comment) -- a still-snoozed task is
     // deliberately excluded from it below.
     final stillAlertedIds = <String>{};
-
     final prefsForSnooze = await SharedPreferences.getInstance();
+    // See consumeFirstRunBaseline's doc comment -- without this, every
+    // Urgent task whose reminderAt had already passed on a brand new
+    // device (or a never-before-seen account on this one) rang the full-
+    // screen alarm for its ENTIRE backlog the instant this ran, instead of
+    // only ringing for reminders that pass from here on. legacyDataExists
+    // must be read BEFORE anything below writes to _alertedOverdueIdsKey
+    // this tick.
+    final isFirstRunOverdue = await consumeFirstRunBaseline(
+      'overdue_alarm',
+      currentUserId,
+      legacyDataExists: prefsForSnooze.containsKey(_alertedOverdueIdsKey),
+    );
+
     final rawSnoozeMap = prefsForSnooze.getString(_snoozedUntilKey);
     Map<String, dynamic> snoozedUntil = {};
     if (rawSnoozeMap != null) {
@@ -293,6 +333,8 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
 
       if (isComplete) {
         // Done -- stop any pending/ringing alarm for it.
+        // ignore: avoid_print
+        print('[FEED] taskId=$id isComplete=true, cancelling any pending/ringing alarm');
         await NotificationService.instance.cancelOverdueAlarm(id);
         continue;
       }
@@ -404,7 +446,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         // alarm permanently instead of just deferring it to the next
         // allowed moment. An already-alerted task stays marked alerted
         // regardless of the window; it doesn't need to fire again.
-        if (!stillSnoozed && (alreadyAlerted || withinWindow)) stillAlertedIds.add(id);
+        if (!stillSnoozed && (alreadyAlerted || withinWindow || isFirstRunOverdue)) stillAlertedIds.add(id);
 
         // Catch-up path: this task's reminder time passed without the
         // alarm ever having been armed for it (e.g. it was created/
@@ -415,7 +457,9 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         // stays pending (not marked alerted, see above) so a later poll
         // inside the window catches it up instead of it ringing late for
         // one moment and then never again.
-        if (!stillSnoozed && !alreadyAlerted && withinWindow) {
+        if (!stillSnoozed && !alreadyAlerted && !isFirstRunOverdue && withinWindow) {
+          // ignore: avoid_print
+          print('[FEED] firing overdue alarm for taskId=$id "$title" (foreground feed pass)');
           await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
           // Posting the notification above only gets Android to launch
           // the full-screen intent when the app is backgrounded/closed
@@ -447,7 +491,32 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       }
     }
 
-    await _saveAlertedIds(stillAlertedIds);
+    // Re-check who's actually snoozed with a FRESH read, right before
+    // persisting -- this whole pass can take a while (myTasksProvider's
+    // own network fetch runs before any of the code above), so a Snooze
+    // tap on the Alarm screen can land WHILE this pass is still in
+    // flight, using data it captured before the snooze. Without this,
+    // finishing this pass AFTER a concurrent snooze just cleared a
+    // task's alerted flag would silently write it straight back in,
+    // permanently undoing the snooze's re-fire. Confirmed live: a task
+    // snoozed for 1 minute got marked "already alerted" again within ~2
+    // seconds by an in-flight feed refresh that started fetching tasks
+    // before the snooze completed, and never rang again.
+    final freshSnoozePrefs = await SharedPreferences.getInstance();
+    await freshSnoozePrefs.reload();
+    final freshRawSnoozeMap = freshSnoozePrefs.getString(_snoozedUntilKey);
+    final freshlySnoozedIds = <String>{};
+    if (freshRawSnoozeMap != null) {
+      try {
+        final map = jsonDecode(freshRawSnoozeMap) as Map<String, dynamic>;
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        for (final entry in map.entries) {
+          final untilMs = entry.value as int?;
+          if (untilMs != null && nowMs < untilMs) freshlySnoozedIds.add(entry.key);
+        }
+      } catch (_) {}
+    }
+    await _saveAlertedIds(stillAlertedIds.difference(freshlySnoozedIds));
     if (snoozeMapChanged) {
       await prefsForSnooze.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
     }

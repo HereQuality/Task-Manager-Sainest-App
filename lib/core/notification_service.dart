@@ -861,6 +861,23 @@ class NotificationService {
     final schedule = await fetchNotificationSchedule();
     final until = schedule.resolveNextAllowedInstant(DateTime.now().add(duration));
 
+    // Stop the CURRENTLY ringing alarm before scheduling the next one --
+    // scheduleOverdueAlarmAt below only registers a future zonedSchedule
+    // trigger, it does nothing to a notification that's already been
+    // posted and is actively playing its alarm-stream sound right now.
+    // Without this, tapping Snooze (from either the Alarm screen or the
+    // notification tray's own quick-action button) left that already-
+    // ringing notification's sound looping indefinitely in the
+    // background even though the Alarm screen itself navigated away --
+    // reading as "the alarm is stuck". cancelOverdueAlarm (End) already
+    // did this; Snooze needs the exact same cancel, just without also
+    // marking the task alerted/synced as "done" the way End's own call
+    // does.
+    try {
+      await _plugin.cancel(_alarmId(taskId));
+    } catch (_) {}
+    await _cancelAlarmKitAlarm(taskId);
+
     // Best-effort, same reasoning as _cancelAlarmKitAlarm's own timeout
     // above: this is bookkeeping only (see _alertedOverdueIdsKey/
     // _snoozedUntilKey doc comment), not the actual alarm. If a

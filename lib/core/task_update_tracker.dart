@@ -158,3 +158,60 @@ String? _latestActivityActorId(Map<String, dynamic> t) {
   }
   return null;
 }
+
+/// Same "silent first run" idea as detectTaskChanges' own `firstRun` above,
+/// generalized for every OTHER independently-tracked "already alerted"
+/// bookkeeping category that does its own persistence instead of going
+/// through detectTaskChanges (overdue/reminder alarms, extra reminders,
+/// team escalations, pending approvals -- see notifications_provider.dart
+/// and background_watcher_service.dart). Each of those categories used to
+/// have NO baseline guard at all: on a device (or account) that had never
+/// run that category's check before -- a brand new device, or logging into
+/// an account that's never been active on this one -- its "already
+/// alerted" set starts completely empty, so every already-overdue Urgent
+/// task/escalation/approval already sitting on the account looked brand
+/// new and rang/fired all at once the moment someone logged in. Confirmed
+/// live: installing on a second device and logging in immediately rang
+/// every already-overdue alarm and re-sent every pending escalation/
+/// approval as a fresh notification.
+///
+/// Scoped per (category, account) exactly like detectTaskChanges'
+/// _initializedKeyPrefix -- switching accounts on the same device gets its
+/// own fresh baseline too, not just a fresh device. Returns true (and
+/// records the flag) only the very first time it's ever called for that
+/// pair; every call after that returns false so the category's normal
+/// alerting logic runs as usual. Callers are expected to use a true result
+/// to silently record every currently-pending item as baseline ("already
+/// seen") WITHOUT actually alerting for any of them, then alert normally
+/// from the next check onward.
+///
+/// [legacyDataExists] -- whether this category's OWN "already alerted"
+/// data key (e.g. notification_service.dart's `_alertedOverdueIdsKey`,
+/// checked with `prefs.containsKey(...)` BEFORE this tick writes to it)
+/// already has a value on this device. This flag itself is brand new code
+/// with no prior installs ever having set it -- so for every EXISTING
+/// user, the very first time their app happens to run this check after
+/// upgrading to a build that added it would otherwise look identical to a
+/// genuinely fresh device, silently swallowing whatever's due right at
+/// that exact moment (confirmed live: this ate a person's own snoozed
+/// alarm coming back due, immediately after upgrading -- the snooze
+/// bookkeeping was correct, this baseline check just mistook "first time
+/// THIS FLAG has ever been checked" for "first time THIS CATEGORY has
+/// ever had data", and it was the update itself, not a new device, that
+/// made the flag's own first check happen to land on it). A device/
+/// account that already has real legacy data for this category has
+/// obviously been checking it since before this baseline concept existed,
+/// so it's grandfathered straight in as already-initialized rather than
+/// waiting for the natural first call -- only a genuinely data-less
+/// account (the actual fresh-device/fresh-account case this was built
+/// for) gets the silent-baseline treatment.
+Future<bool> consumeFirstRunBaseline(String category, String? currentUserId, {required bool legacyDataExists}) async {
+  final prefs = await SharedPreferences.getInstance();
+  final key = currentUserId != null
+      ? 'first_run_baseline_${category}_$currentUserId'
+      : 'first_run_baseline_$category';
+  final alreadyRan = prefs.getBool(key) ?? false;
+  if (alreadyRan) return false;
+  await prefs.setBool(key, true);
+  return !legacyDataExists;
+}
