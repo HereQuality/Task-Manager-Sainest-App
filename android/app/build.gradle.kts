@@ -66,14 +66,14 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
-            // Explicitly off (this was already the implicit default, but
-            // left unstated) -- code shrinking is what caused
-            // flutter_local_notifications' documented Gson/TypeToken
-            // crash on this app (see proguard-rules.pro's own comment for
-            // the full story). Don't flip this on without also verifying
-            // those keep rules actually prevent it recurring.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // Code shrinking previously caused flutter_local_notifications'
+            // documented Gson/TypeToken crash on this app (see
+            // proguard-rules.pro's own comment for the full story). The
+            // keep rules it recommends are applied below via proguardFiles,
+            // so shrinking is back on -- if notification scheduling ever
+            // breaks again, check those rules first.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
