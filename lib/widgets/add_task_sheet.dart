@@ -42,7 +42,14 @@ class _AddTaskResult {
 /// SuperAdmin -- see listMySpaces in space.controller.js, spacesProvider
 /// just calls GET /spaces as-is), while Assign To deliberately lists
 /// every active employee in the company (see assignableEmployeesProvider)
-/// since a task can be handed to anyone, not just people in that Space.
+/// since a task can be handed to anyone, not just people in that Space --
+/// including someone on a completely different team than whoever's
+/// creating this task. That mismatch is exactly why creation and
+/// assignment happen as two separate calls below (createTaskInSpace,
+/// then assignTaskAndMoveSpace in tasks_provider.dart) instead of one:
+/// the task always ends up in the ASSIGNEE's real Space, resolved
+/// server-side, regardless of which (possibly unrelated) Space this
+/// account happened to have selected or could even see.
 Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
   final result = await showModalBottomSheet<_AddTaskResult>(
     context: context,
@@ -54,10 +61,9 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
 
   if (result == null) return;
 
-  await createTaskInSpace(
+  final taskId = await createTaskInSpace(
     result.spaceId,
     name: result.name,
-    assigneeId: result.assigneeId,
     startDate: result.startDate,
     dueDate: result.dueDate,
     reminderAt: result.reminderAt,
@@ -65,6 +71,15 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
     priority: result.priority,
     projectId: result.projectId,
   );
+  // Two-step on purpose when an assignee was picked -- see
+  // assignTaskAndMoveSpace's own doc comment: this is what actually gets
+  // the task into that person's real team even when they're on a
+  // different team than whoever's creating it (the Space picker above
+  // only ever lists Spaces THIS account can see, so it may not even have
+  // offered the assignee's real team as an option).
+  if (result.assigneeId != null && taskId.isNotEmpty) {
+    await assignTaskAndMoveSpace(taskId, result.assigneeId!);
+  }
   ref.invalidate(myTasksProvider);
   ref.invalidate(dashboardStatsProvider);
   if (context.mounted) {
@@ -83,6 +98,13 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   final _nameCtrl = TextEditingController();
   String? _spaceId;
   String? _assigneeId;
+  // The chosen assignee's own Space, fetched via fetchEmployeeSpace the
+  // moment they're picked -- kept separately from spacesAsync's own list
+  // (which only ever holds Spaces THIS account can see) so it can be
+  // merged into the Space dropdown's items below even when it's a team
+  // this account otherwise has no visibility into at all. Null while
+  // loading or if the assignee isn't in any Space yet.
+  Map<String, dynamic>? _assigneeSpace;
   String? _projectId;
   String? _priority;
   DateTime? _startDate;
@@ -97,6 +119,45 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   // the list on screen always reads chronologically regardless of the
   // order they were added in.
   final List<DateTime> _extraReminders = [];
+
+  // Bumped on every assignee pick, so a slow fetchEmployeeSpace response
+  // for an EARLIER pick can't clobber a newer one that already resolved
+  // (or is still in flight) -- e.g. quickly picking Person A then Person
+  // B before A's lookup returns.
+  int _assigneeSpaceRequestToken = 0;
+
+  // Picking an Assign To person looks up their own Space (GET /spaces/
+  // for-employee/:id -- see fetchEmployeeSpace's own doc comment) so the
+  // Space field below can show/select the CORRECT team even when this
+  // account has no visibility into it at all (a non-Full-Access person
+  // assigning someone on a different team, whose team never appears in
+  // spacesAsync's own list). The actual task placement doesn't depend on
+  // this succeeding -- see showAddTaskSheet's assignTaskAndMoveSpace call,
+  // which resolves it server-side regardless -- this only fixes what the
+  // picker DISPLAYS while filling out the form.
+  Future<void> _onAssigneeChanged(String? v) async {
+    final token = ++_assigneeSpaceRequestToken;
+    setState(() {
+      _assigneeId = v;
+      _assigneeSpace = null;
+    });
+    if (v == null) return;
+    Map<String, dynamic>? space;
+    try {
+      space = await fetchEmployeeSpace(v);
+    } catch (_) {
+      // Best-effort display only -- a failed lookup just leaves the
+      // Space field showing whatever it already had (or blank), same as
+      // before this feature existed. The task itself still ends up in
+      // the right place either way (see assignTaskAndMoveSpace).
+      return;
+    }
+    if (!mounted || token != _assigneeSpaceRequestToken) return;
+    setState(() {
+      _assigneeSpace = space;
+      if (space != null) _spaceId = space['_id']?.toString();
+    });
+  }
 
   @override
   void dispose() {
@@ -311,26 +372,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
                 employees: employees,
                 value: _assigneeId,
                 currentUserId: currentUserId,
-                onChanged: (v) => setState(() {
-                  _assigneeId = v;
-                  // Auto-picks whichever Space this person is a member
-                  // of, same "assign them, the task lands in their own
-                  // team" idea as the web app's My Task page (see
-                  // task.controller.js#updateTask's moveToAssigneeSpace
-                  // handling) -- just applied at creation time here
-                  // instead of via a later reassignment. Left as
-                  // whatever it already was if the person isn't a
-                  // member of any Space this account can see (e.g. no
-                  // shared Space at all), or if Assign to was cleared.
-                  final spaces = spacesAsync.value;
-                  if (v != null && spaces != null) {
-                    final match = spaces.where((s) {
-                      final memberIds = s['memberIds'];
-                      return memberIds is List && memberIds.map((m) => m.toString()).contains(v);
-                    });
-                    if (match.isNotEmpty) _spaceId = match.first['_id'] as String;
-                  }
-                }),
+                onChanged: (v) => _onAssigneeChanged(v),
               ),
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
@@ -496,27 +538,47 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             // required either way and this is also the only way to set
             // one before an assignee's been picked at all.
             spacesAsync.when(
-              data: (spaces) => DropdownButtonFormField<String>(
-                // DropdownButtonFormField only ever reads `initialValue`
-                // once, the moment its FormFieldState is first created
-                // (same as any other FormField's initialValue -- it does
-                // NOT track a changed value across rebuilds on its own).
-                // Keying it by _spaceId forces a fresh FormFieldState
-                // whenever that changes, which is what actually makes the
-                // auto-pick above (or a plain manual re-selection) show up
-                // here instead of silently staying on the stale display
-                // while the real underlying value has already moved on.
-                key: ValueKey(_spaceId),
-                initialValue: _spaceId,
-                decoration: const InputDecoration(labelText: 'Space'),
-                items: spaces
-                    .map((s) => DropdownMenuItem<String>(
-                          value: s['_id'] as String,
-                          child: Text(s['name']?.toString() ?? 'Untitled space'),
-                        ))
-                    .toList(),
-                onChanged: (v) => setState(() => _spaceId = v),
-              ),
+              data: (spaces) {
+                // Merges in the chosen assignee's own Space
+                // (_assigneeSpace, from _onAssigneeChanged/
+                // fetchEmployeeSpace) whenever it isn't already one of
+                // the Spaces THIS account can see -- without this, a
+                // non-Full-Access person assigning someone on a
+                // different team would have `_spaceId` set to a value
+                // that isn't in `items` at all, so the dropdown would
+                // just show blank instead of that person's real team
+                // name (the exact gap that made this feel broken
+                // compared to a SuperAdmin's account, where that team
+                // already happens to be in their own full spacesAsync
+                // list).
+                final items = [...spaces];
+                final assigneeSpace = _assigneeSpace;
+                if (assigneeSpace != null &&
+                    !items.any((s) => s['_id']?.toString() == assigneeSpace['_id']?.toString())) {
+                  items.add(assigneeSpace);
+                }
+                return DropdownButtonFormField<String>(
+                  // DropdownButtonFormField only ever reads `initialValue`
+                  // once, the moment its FormFieldState is first created
+                  // (same as any other FormField's initialValue -- it does
+                  // NOT track a changed value across rebuilds on its own).
+                  // Keying it by _spaceId forces a fresh FormFieldState
+                  // whenever that changes, which is what actually makes the
+                  // auto-pick above (or a plain manual re-selection) show up
+                  // here instead of silently staying on the stale display
+                  // while the real underlying value has already moved on.
+                  key: ValueKey(_spaceId),
+                  initialValue: _spaceId,
+                  decoration: const InputDecoration(labelText: 'Space'),
+                  items: items
+                      .map((s) => DropdownMenuItem<String>(
+                            value: s['_id'] as String,
+                            child: Text(s['name']?.toString() ?? 'Untitled space'),
+                          ))
+                      .toList(),
+                  onChanged: (v) => setState(() => _spaceId = v),
+                );
+              },
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),

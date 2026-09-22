@@ -31,6 +31,14 @@ class TaskChangeResult {
   // separate myTask*/teamTask* toggles), since myTasksProvider's task
   // list already mixes both together for a manager/senior.
   final String? assigneeId;
+  // Whether the latest activityLog entry was authored by the same person
+  // viewing this device (see _latestActivityActorId below). Callers use
+  // this to still suppress "you edited a teammate's task" (nobody needs a
+  // push about their own action on someone else's task), but NOT to
+  // suppress "you assigned a task to yourself" -- self-assignment is a
+  // real, intentional action the person creating it wants confirmed, same
+  // as anyone else assigning it to them would be.
+  final bool isSelfMade;
 
   TaskChangeResult({
     required this.taskId,
@@ -39,6 +47,7 @@ class TaskChangeResult {
     required this.isNew,
     this.activityMessage,
     this.assigneeId,
+    this.isSelfMade = false,
   });
 }
 
@@ -57,13 +66,15 @@ class TaskChangeResult {
 /// fire a burst of notifications for a person's entire backlog -- that
 /// first call only takes a silent baseline snapshot instead.
 ///
-/// [currentUserId] (see ApiClient.readCurrentUserId) suppresses a result
-/// entirely when the task's latest activityLog entry was authored by the
-/// person looking at their own device -- nobody needs a push telling
-/// them about a change they just made themselves (e.g. assigning a task
-/// to themselves, or completing it). The version is still recorded either
-/// way, so a self-made change never gets re-flagged as "new" once
-/// someone else's edit updates it in the future.
+/// [currentUserId] (see ApiClient.readCurrentUserId) marks each result
+/// with `isSelfMade` when the task's latest activityLog entry was
+/// authored by the person looking at their own device -- callers use
+/// this to suppress "you edited a teammate's task" (nobody needs a push
+/// about their own action on someone else's task) while still notifying
+/// for "you assigned a task to yourself" (a real, intentional action the
+/// person wants confirmed). The version is recorded either way, so a
+/// self-made change never gets re-flagged as "new" once someone else's
+/// edit updates it in the future.
 Future<List<TaskChangeResult>> detectTaskChanges(
   List<Map<String, dynamic>> tasks, {
   String? currentUserId,
@@ -100,7 +111,7 @@ Future<List<TaskChangeResult>> detectTaskChanges(
     final lastSeen = seen[id] as String?;
     if (lastSeen == null) {
       updated[id] = version;
-      if (!firstRun && !isSelfMade) {
+      if (!firstRun) {
         results.add(TaskChangeResult(
           taskId: id,
           title: title,
@@ -108,22 +119,22 @@ Future<List<TaskChangeResult>> detectTaskChanges(
           isNew: true,
           activityMessage: _latestActivityMessage(t),
           assigneeId: assigneeId,
+          isSelfMade: isSelfMade,
         ));
       }
       continue;
     }
     if (lastSeen != version) {
       updated[id] = version;
-      if (!isSelfMade) {
-        results.add(TaskChangeResult(
-          taskId: id,
-          title: title,
-          spaceName: spaceName,
-          isNew: false,
-          activityMessage: _latestActivityMessage(t),
-          assigneeId: assigneeId,
-        ));
-      }
+      results.add(TaskChangeResult(
+        taskId: id,
+        title: title,
+        spaceName: spaceName,
+        isNew: false,
+        activityMessage: _latestActivityMessage(t),
+        assigneeId: assigneeId,
+        isSelfMade: isSelfMade,
+      ));
     }
   }
 

@@ -125,22 +125,17 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   // notifications are turned back on (a deliberate "drop forever while
   // muted" design).
   //
-  // Outside the notification window is different: those changes SHOULD
-  // still be reported, just later -- so detectTaskChanges is skipped
-  // ENTIRELY in that case (not called at all, no items to iterate),
-  // leaving its snapshot un-advanced so the next feed build back inside
-  // the window reports them instead of having silently marked them seen.
-  // Safe to gate on a single combined condition here (rather than one
-  // check per category) because the window itself doesn't vary between
-  // "mine" and "a team member's" within the same poll -- only skipped
-  // when NEITHER category would even want to fire, so a muted-but-not-
-  // suppressed category still gets its own "drop forever" treatment
-  // below exactly as before.
+  // NOT gated by `withinWindow` (unlike the overdue-alarm logic further
+  // down this function) -- server/utils/notificationSchedule.js's own doc
+  // comment is explicit that the company's quiet-hours window "never
+  // touches in-app real-time updates or the mobile push feed, only
+  // email." A plain "assigned to you"/"task updated" notification is
+  // exactly that case, so it used to be wrongly held back until the
+  // window reopened (often landing right at midnight if office hours ran
+  // late) -- fixed by always calling detectTaskChanges here, same as
+  // background_watcher_service.dart's matching fix.
   final currentUserId = ref.watch(authProvider).user?.id;
-  final anyTaskActivityWanted = settings.myTaskNotifications || settings.teamTaskNotifications;
-  final changes = (anyTaskActivityWanted && !withinWindow)
-      ? const <TaskChangeResult>[]
-      : await detectTaskChanges(tasks, currentUserId: currentUserId);
+  final changes = await detectTaskChanges(tasks, currentUserId: currentUserId);
   // myTasksProvider ("/tasks/mine/all") mixes a manager/senior's own
   // tasks together with every subordinate's (see
   // task.controller.js#listMyTasksAll) -- this map is what tells "my
@@ -169,6 +164,10 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         body: body,
       );
     } else {
+      // Unlike the "isMine" branch above, still skip a change the viewer
+      // made themselves to someone ELSE's task (e.g. reassigning a
+      // teammate's task) -- see TaskChangeResult.isSelfMade's doc comment.
+      if (change.isSelfMade) continue;
       if (!settings.teamTaskNotifications) continue;
       if (change.isNew ? !settings.teamTaskAssigned : !settings.teamTaskUpdates) continue;
       final assigneeName = assigneeNameByTaskId[change.taskId] ?? 'A team member';

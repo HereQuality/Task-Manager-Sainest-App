@@ -384,11 +384,13 @@ final taskDetailProvider = FutureProvider.autoDispose
 
 /// Creates a task directly in a Space's own root List -- POST
 /// /api/v1/tasks/space/:spaceId (same endpoint the web app's Space page
-/// "+ Add task" uses). Backs the bottom nav's "+" Add task sheet.
-Future<void> createTaskInSpace(
+/// "+ Add task" uses). Backs the bottom nav's "+" Add task sheet. Returns
+/// the created task's id so a caller can follow up with
+/// assignTaskAndMoveSpace below -- see that function's doc comment for
+/// why `assigneeId` is deliberately NOT accepted here.
+Future<String> createTaskInSpace(
   String spaceId, {
   required String name,
-  String? assigneeId,
   DateTime? startDate,
   DateTime? dueDate,
   DateTime? reminderAt,
@@ -406,9 +408,8 @@ Future<void> createTaskInSpace(
   // off once anything (the web app, this app) converts it back to local
   // time for display. Converting to UTC first makes the serialized
   // string end in "Z", which is unambiguous everywhere.
-  await ApiClient.instance.dio.post('/tasks/space/$spaceId', data: {
+  final res = await ApiClient.instance.dio.post('/tasks/space/$spaceId', data: {
     'name': name,
-    if (assigneeId != null) 'assigneeId': assigneeId,
     if (startDate != null) 'startDate': startDate.toUtc().toIso8601String(),
     if (dueDate != null) 'dueDate': dueDate.toUtc().toIso8601String(),
     if (reminderAt != null) 'reminderAt': reminderAt.toUtc().toIso8601String(),
@@ -416,5 +417,31 @@ Future<void> createTaskInSpace(
       'extraReminders': extraReminders.map((d) => d.toUtc().toIso8601String()).toList(),
     if (priority != null) 'priority': priority,
     if (projectId != null) 'projectId': projectId,
+  });
+  return (res.data['data']?['_id'] ?? '').toString();
+}
+
+/// Sets a just-created task's assignee and lets the SERVER relocate it
+/// into that person's actual Space if it isn't there already -- PUT
+/// /api/v1/tasks/:id with moveToAssigneeSpace: true (see
+/// task.controller.js#updateTask's own handling of that flag).
+///
+/// Deliberately a separate call from creation, not an `assigneeId` field
+/// on the initial POST: the server only runs its "move to assignee's
+/// Space" check when the assignee VALUE actually changes
+/// (`newId !== task.assigneeId`, see updateTask). Setting it already at
+/// creation time makes that check see "no change" and silently skip
+/// relocating -- which is exactly the bug this fixes. The Add Task
+/// sheet's own Space picker (add_task_sheet.dart) only ever lists Spaces
+/// THIS account can see (GET /spaces, scoped to your own memberships
+/// unless you're a SuperAdmin), so if you assign someone from a
+/// different team than your own, their real Space was never even in
+/// that dropdown to begin with -- this lets the server, which has full
+/// visibility, resolve and move it correctly regardless of what this
+/// account could see.
+Future<void> assignTaskAndMoveSpace(String taskId, String assigneeId) async {
+  await ApiClient.instance.dio.put('/tasks/$taskId', data: {
+    'assigneeId': assigneeId,
+    'moveToAssigneeSpace': true,
   });
 }

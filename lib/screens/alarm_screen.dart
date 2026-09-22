@@ -166,10 +166,23 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProv
   Future<void> _end() async {
     if (_taskId.isEmpty || _busy) return;
     setState(() => _busy = true);
-    await NotificationService.instance.cancelOverdueAlarm(_taskId);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Alarm dismissed')));
-      context.go('/home');
+    try {
+      // Same reasoning as _snooze's own try/catch above -- cancelOverdueAlarm
+      // is written to always complete and never throw, but a defensive
+      // catch here means a future change to it (or a platform-channel
+      // surprise) can never again leave _busy stuck true with no way to
+      // reset it, which reads as this whole screen having frozen.
+      await NotificationService.instance.cancelOverdueAlarm(_taskId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Alarm dismissed')));
+        context.go('/home');
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _busy = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Could not dismiss this alarm — try again.')));
+      }
     }
   }
 
@@ -320,7 +333,13 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProv
         Expanded(
           child: OutlinedButton.icon(
             onPressed: _busy ? null : _pickSnoozeDuration,
-            icon: const Icon(Icons.snooze_rounded, size: 20),
+            icon: _busy
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                  )
+                : const Icon(Icons.snooze_rounded, size: 20),
             label: const Text('Snooze'),
             style: OutlinedButton.styleFrom(
               minimumSize: const Size.fromHeight(56),

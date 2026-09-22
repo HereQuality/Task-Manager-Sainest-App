@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:android_intent_plus/android_intent.dart';
@@ -781,7 +782,16 @@ class NotificationService {
     // fresh app install/reinstall wipes clean -- reviving an already-
     // dismissed alarm the moment someone logs back in and the background
     // watcher's next poll sees reminderAt still sitting in the past.
-    await _syncReminderToServer(taskId, null);
+    //
+    // Deliberately NOT awaited -- _syncReminderToServer's own doc comment
+    // already promises this "must never block a Snooze/End button", but
+    // awaiting it here broke that promise: under a slow connection this
+    // was the single biggest contributor to the Alarm screen's End button
+    // sitting in its loading state for many seconds with no feedback,
+    // reading as stuck/frozen. Its own 8s timeout plus internal try/catch
+    // still guarantee it completes and never throws unhandled; it just no
+    // longer has to finish before the person can leave this screen.
+    unawaited(_syncReminderToServer(taskId, null));
   }
 
   Future<void> _markAlerted(String taskId) async {
@@ -896,7 +906,12 @@ class NotificationService {
     // before the snooze window ends (see cancelOverdueAlarm's own doc
     // comment on why that can happen) would treat it as overdue for
     // catch-up firing again immediately, ignoring the snooze entirely.
-    await _syncReminderToServer(taskId, until);
+    //
+    // Not awaited, same reasoning as cancelOverdueAlarm's own call to this
+    // -- best-effort background sync, bounded by its own 8s timeout,
+    // that must never add to how long the Alarm screen's Snooze button
+    // sits spinning under a slow connection.
+    unawaited(_syncReminderToServer(taskId, until));
 
     await scheduleOverdueAlarmAt(
       taskId: taskId,

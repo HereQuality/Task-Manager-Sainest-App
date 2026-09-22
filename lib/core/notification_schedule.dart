@@ -2,11 +2,17 @@ import 'api_client.dart';
 
 /// Mirrors server/utils/notificationSchedule.js -- the company-wide
 /// holidays/weekly-off-days/office-hours window a Full Access person sets
-/// on the Teams page (Settings -> "Notification Schedule"). That file
-/// already gates every task EMAIL through the equivalent
-/// isWithinNotificationWindow() check; this is the same rule applied to
-/// the mobile app's own push notifications (including the full-screen
-/// Urgent-task alarm), which until now ignored it entirely.
+/// on the Teams page (Settings -> "Notification Schedule"). That file's
+/// own doc comment is explicit this window "never touches in-app
+/// real-time updates or the mobile push feed, only email" -- so on the
+/// mobile side this is used ONLY for the loud, sleep-interrupting stuff
+/// (the full-screen overdue/Urgent alarm, manager escalations), never for
+/// a plain "assigned to you"/"task updated" notification. Applying it to
+/// that plain-notification path used to be exactly this bug: a task
+/// created outside the window sat completely undetected until the window
+/// reopened, often surfacing right at midnight -- see
+/// background_watcher_service.dart#_checkTaskUpdatesOnce and
+/// notifications_provider.dart's matching fix.
 ///
 /// All date/time math uses a fixed +05:30 offset (Asia/Kolkata, no DST)
 /// rather than the device's own local timezone -- same "kept in sync by
@@ -100,8 +106,8 @@ class NotificationSchedule {
     holidays: {},
     weeklyOffDays: {},
     officeHoursEnabled: false,
-    officeStartMinutes: 0,
-    officeEndMinutes: 24 * 60 - 1,
+    officeStartMinutes: 9 * 60, // 09:00 -- matches DEFAULT_SCHEDULE in server/utils/notificationSchedule.js
+    officeEndMinutes: 18 * 60, // 18:00 -- ditto
   );
 
   factory NotificationSchedule.fromJson(Map<String, dynamic> json) {
@@ -124,8 +130,16 @@ class NotificationSchedule {
       holidays: holidays,
       weeklyOffDays: weeklyOff,
       officeHoursEnabled: officeMap['enabled'] == true,
-      officeStartMinutes: _parseTimeToMinutes(officeMap['start']?.toString(), 0),
-      officeEndMinutes: _parseTimeToMinutes(officeMap['end']?.toString(), 24 * 60 - 1),
+      // Fallbacks match DEFAULT_SCHEDULE.officeHours in server/utils/
+      // notificationSchedule.js (09:00-18:00) rather than "all day" --
+      // the server always fills in a full officeHours object (see
+      // getNotificationSchedule there), so these only matter for a
+      // malformed/partial payload, but a midnight-wide fallback silently
+      // turned a missing `end` value into "the window never really
+      // closes until 23:59," which is exactly what produced the
+      // midnight-clustering bug fixed above.
+      officeStartMinutes: _parseTimeToMinutes(officeMap['start']?.toString(), 9 * 60),
+      officeEndMinutes: _parseTimeToMinutes(officeMap['end']?.toString(), 18 * 60),
     );
   }
 

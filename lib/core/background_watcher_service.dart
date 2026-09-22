@@ -546,19 +546,21 @@ Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, Notificatio
   // flood in at once the moment notifications are turned back on (a
   // deliberate "drop forever while muted" design).
   //
-  // Outside the notification window is different: those changes SHOULD
-  // still be reported, just later -- so detectTaskChanges is skipped
-  // ENTIRELY in that case (not called at all), leaving its snapshot
-  // un-advanced, so the very next tick that runs back inside the window
-  // sees them as still-unseen and reports them then instead of losing
-  // them.
+  // NOT gated by the company's quiet-hours `schedule` (unlike the overdue
+  // alarm / escalation checks elsewhere in this file) -- server/utils/
+  // notificationSchedule.js's own doc comment is explicit that this
+  // window "never touches in-app real-time updates or the mobile push
+  // feed, only email." A plain "assigned to you"/"task updated"
+  // notification is exactly that in-app/push case, so it used to be
+  // wrongly held back until the window reopened (often landing right at
+  // midnight if office hours ran late) -- fixed by firing it the moment
+  // this tick sees it, same as email is silenced but Kanban/List/Calendar
+  // updates never are.
   final myTaskAllowed = prefs.getBool('notif_my_task') ?? true;
   // Same team-member mirror as notifications_provider.dart's foreground
   // pass -- see settings_provider.dart's doc comment on
   // teamTaskNotifications.
   final teamTaskAllowed = prefs.getBool('notif_team_task') ?? true;
-  final anyTaskActivityWanted = myTaskAllowed || teamTaskAllowed;
-  if (anyTaskActivityWanted && !schedule.isWithinWindow(DateTime.now())) return;
 
   final assignedAllowed = prefs.getBool('notif_task_assigned') ?? true;
   final updatesAllowed = prefs.getBool('notif_task_updates') ?? true;
@@ -584,6 +586,10 @@ Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, Notificatio
         body: body,
       );
     } else {
+      // Unlike the "isMine" branch above, still skip a change the viewer
+      // made themselves to someone ELSE's task -- see TaskChangeResult.
+      // isSelfMade's doc comment (task_update_tracker.dart).
+      if (change.isSelfMade) continue;
       if (!teamTaskAllowed) continue;
       if (change.isNew ? !teamAssignedAllowed : !teamUpdatesAllowed) continue;
       final assigneeName = assigneeNameByTaskId[change.taskId] ?? 'A team member';
