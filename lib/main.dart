@@ -1,19 +1,48 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/router.dart';
 import 'core/theme.dart';
+import 'core/app_update_service.dart';
 import 'core/notification_service.dart';
+import 'core/push_service.dart';
 import 'core/background_watcher_service.dart';
 import 'core/pending_attachment_service.dart';
 import 'core/socket_service.dart';
+import 'firebase_options.dart';
 import 'providers/auth_provider.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  // Deliberately printed -- proves initializeApp actually produced a
+  // working FirebaseApp (name/options) rather than silently no-op'ing,
+  // which native logs alone can't confirm from the Dart side.
+  // ignore: avoid_print
+  print('[Firebase] initialized: ${Firebase.app().name}, projectId=${Firebase.app().options.projectId}, '
+      'appId=${Firebase.app().options.appId}');
+  // Fire-and-forget, started as early as possible -- deliberately NOT
+  // awaited here (a network round trip blocking the very first frame
+  // would violate this file's own "the person needs to see the app
+  // before anything else happens" principle, see runApp's doc comment
+  // below), but kicked off before everything else in this function so it
+  // resolves as soon as realistically possible. checkForRequiredUpdate()
+  // itself fails open on any error, and forceUpdateNotifier only ever
+  // redirects away from wherever the person already is if it comes back
+  // required -- see router.dart's redirect, which is what actually acts
+  // on this.
+  unawaited(checkForRequiredUpdate().then((result) => forceUpdateNotifier.value = result));
+
   await NotificationService.instance.init();
+  // Must run after NotificationService.init() (foreground pushes are
+  // re-displayed through it -- see push_service.dart's _showForeground)
+  // and before the permission cascade below, which registers this
+  // device's token with the backend the moment login/session-restore
+  // succeeds (see auth_provider.dart).
+  await PushService.instance.init();
   // Must run before auth_provider.dart's startBackgroundWatcher/
   // stopBackgroundWatcher calls (login, logout, or a remembered session
   // resuming on cold start) -- configure() has to happen once before the

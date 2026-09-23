@@ -2,32 +2,22 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>EXAppExtensionAttributes</key>
+	<!-- This target is a WidgetKit extension (AlarmKit's Live Activity UI --
+	     see AlarmkitWidgetLiveActivity.swift/AlarmkitWidgetBundle.swift),
+	     not an Accessory Setup Extension. The previous
+	     EXAppExtensionAttributes/EXExtensionPointIdentifier =
+	     com.apple.accessory-setup-extension declaration (with placeholder
+	     Bluetooth service UUID and "Example Protocol" UTType boilerplate)
+	     was Apple's AccessorySetupKit template content, seemingly picked by
+	     mistake when this target was created -- it made App Store Connect
+	     validation demand the com.apple.developer.accessory-setup-discovery-
+	     extension entitlement for a feature this extension never uses.
+	     Matches flutter_alarmkit's own example project's AlarmkitWidget
+	     Info.plist exactly. -->
+	<key>NSExtension</key>
 	<dict>
-		<key>EXExtensionPointIdentifier</key>
-		<string>com.apple.accessory-setup-extension</string>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.widgetkit-extension</string>
 	</dict>
-	<key>NSBluetoothServices</key>
-	<array>
-		<string>87C152ED-2105-48B2-87DF-E92DD79FC454</string>
-	</array>
-	<key>UTExportedTypeDeclarations</key>
-	<array>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.data-access-protocol</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>Example Protocol Display Name</string>
-			<key>UTTypeIcons</key>
-			<dict>
-				<key>UTTypeSymbolName</key>
-				<string>ExampleProtocolIcon</string>
-			</dict>
-			<key>UTTypeIdentifier</key>
-			<string>com.example.example-protocol</string>
-		</dict>
-	</array>
 </dict>
 </plist>

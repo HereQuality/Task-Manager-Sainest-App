@@ -2,6 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Lets APNs wake the app to handle a remote push (FCM) even while
+	     backgrounded/not running -- without this, iOS only ever delivers
+	     the notification banner itself, never runs any handler code, which
+	     is fine for a plain "notification" payload but would silently drop
+	     a data-only or content-available push. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+	<!-- Automatic method swizzling (FirebaseMessaging intercepting
+	     AppDelegate's didRegisterForRemoteNotificationsWithDeviceToken to
+	     wire the APNs token in on its own) never worked reliably with
+	     this app's AppDelegate -- getToken() kept failing with
+	     apns-token-not-set even with permission granted, Firebase
+	     correctly configured, and every native/Apple-portal config
+	     verified correct. AppDelegate.swift now forwards the token
+	     manually instead (see its own doc comment), which needs this off
+	     -- otherwise Firebase's swizzle and our manual forward could both
+	     try to handle the same callback. -->
+	<key>FirebaseAppDelegateProxyEnabled</key>
+	<false/>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

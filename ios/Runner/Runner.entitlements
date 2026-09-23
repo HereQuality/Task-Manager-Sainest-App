@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict/>
+<dict>
+	<!-- Must be switched to "production" before an App Store / TestFlight
+	     archive build -- Xcode does not do this automatically, and a
+	     mismatch against the provisioning profile's push type is a silent
+	     "push registers fine in dev, never arrives once released" failure. -->
+	<key>aps-environment</key>
+	<string>production</string>
+</dict>
 </plist>

@@ -16,6 +16,8 @@ import '../screens/awaiting_approval_screen.dart';
 import '../screens/approvals_hub_screen.dart';
 import '../core/notification_service.dart';
 import '../core/pending_attachment_service.dart';
+import '../core/app_update_service.dart';
+import '../screens/force_update_screen.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final authNotifier = ref.watch(authProvider.notifier);
@@ -28,11 +30,27 @@ final routerProvider = Provider<GoRouter>((ref) {
     // notification_service.dart) so the redirect below re-runs for
     // either trigger.
     refreshListenable: Listenable.merge(
-      [_AuthListenable(ref), pendingAlarmNotifier, pendingAttachmentTaskNotifier, pendingTaskOpenNotifier],
+      [
+        _AuthListenable(ref),
+        pendingAlarmNotifier,
+        pendingAttachmentTaskNotifier,
+        pendingTaskOpenNotifier,
+        forceUpdateNotifier,
+      ],
     ),
     redirect: (context, state) {
       final auth = ref.read(authProvider);
       final loc = state.matchedLocation;
+
+      // Highest priority, ahead of even the auth check below -- a build
+      // old enough to be force-blocked shouldn't be allowed to reach
+      // login, Home, or anywhere else first. See app_update_service.dart/
+      // main.dart for how this gets set; it starts null (check still in
+      // flight or not required) and this is simply a no-op until/unless
+      // it resolves to required.
+      if (forceUpdateNotifier.value?.required == true) {
+        return loc == '/force-update' ? null : '/force-update';
+      }
 
       // AuthStatus.unknown = _restoreSession is still checking secure
       // storage / verifying the token against /auth/me. Routing to a
@@ -72,6 +90,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     },
     routes: [
       GoRoute(path: '/splash', builder: (context, state) => const SplashScreen()),
+      GoRoute(path: '/force-update', builder: (context, state) => const ForceUpdateScreen()),
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
       GoRoute(
         path: '/home',

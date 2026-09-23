@@ -4,6 +4,8 @@ plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    // Must be applied last -- reads google-services.json in this directory.
+    id("com.google.gms.google-services")
 }
 
 // Play Store upload-signing credentials -- read from android/key.properties

@@ -1,7 +1,7 @@
 name: hqepl_mobile
 description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
 publish_to: 'none'
-version: 1.0.0+62
+version: 1.1.0+63
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -80,16 +80,56 @@ dependencies:
   # Opens a non-image task attachment (PDF, doc, etc.) in whatever app the
   # phone already has for it, since this app has no in-app document viewer.
   url_launcher: ^6.3.1
+  # This install's own version/build number, read at runtime and compared
+  # against the server-configured minimum (see app_update_service.dart) --
+  # the whole force-update gate depends on this being the actual installed
+  # value, not whatever pubspec.yaml's version line says at build time
+  # (those two CAN'T drift for a given build, but reading it live avoids
+  # ever having to trust a compile-time constant for something this
+  # consequential).
+  package_info_plus: ^8.1.2
   # Realtime task events (task:created/task:updated) from the same
   # Socket.IO server the web app already connects to (server/config/
   # socket.js, client/src/lib/socket.js) -- see socket_service.dart.
   socket_io_client: ^2.0.3+1
+  # Remote push (FCM) -- the only way to alert a person on a task
+  # change while the app is fully closed. Unlike socket_io_client above
+  # (which needs a live connection, so only works foregrounded) and
+  # Android's background_watcher_service.dart (Android-only background
+  # polling, see CLAUDE.md), FCM is delivered by the OS itself even
+  # with the app not running. iOS in particular has no other path to
+  # this -- Apple gives third-party apps no equivalent to Android's
+  # foreground-service polling.
+  # Bumped to 4.x (from 3.x) -- required by the firebase_messaging fix
+  # branch pinned below via dependency_overrides.
+  firebase_core: ^4.15.0
+  firebase_messaging: ^15.1.3
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
   flutter_launcher_icons: ^0.13.1
+
+# TEMPORARY -- pinned to the Firebase team's own draft fix branch for
+# https://github.com/firebase/flutterfire/issues/18699: on a UIScene-based
+# app where AppDelegate owns UNUserNotificationCenter's delegate (exactly
+# this app's setup -- see ios/Runner/AppDelegate.swift), firebase_messaging
+# forces UNNotificationPresentationOptionNone in willPresentNotification
+# regardless of what flutter_local_notifications' own show() call
+# requested, silently hiding every foreground push-triggered local
+# notification even though show() itself reports success. Confirmed via
+# that issue thread as an exact reproduction of this app's symptom
+# (foreground banner never appears, Notification Center/Lock Screen never
+# show it either, no error anywhere). Remove this override and go back to
+# a normal ^ constraint once the fix ships in a released firebase_messaging
+# version -- check https://github.com/firebase/flutterfire/pull/18701.
+dependency_overrides:
+  firebase_messaging:
+    git:
+      url: https://github.com/firebase/flutterfire.git
+      ref: messaging_18699
+      path: packages/firebase_messaging/firebase_messaging
 
 flutter:
   uses-material-design: true

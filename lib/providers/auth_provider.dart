@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api_client.dart';
 import '../core/background_watcher_service.dart';
 import '../core/notification_service.dart';
+import '../core/push_service.dart';
 import '../models/user.dart';
 
 enum AuthStatus { unknown, authenticated, unauthenticated }
@@ -138,6 +141,13 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // this app's own update, and starting an already-running one is a
       // harmless no-op (see startBackgroundWatcher's isRunning check).
       await startBackgroundWatcher();
+      // Re-registers this device's push token against the now-known user
+      // on every restore, not just fresh logins -- the backend row ties a
+      // token to a user id, so a remembered session needs this re-sent
+      // every cold start in case the app was reinstalled (new token) or
+      // this token was previously registered to a different account on a
+      // shared device.
+      unawaited(PushService.instance.registerCurrentToken());
     } on DioException catch (e) {
       // Only a real "this token is no good" response should force a
       // fresh login. Anything else (no network yet at cold start, the
@@ -195,6 +205,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       _authenticatedAt = DateTime.now();
       await _dio.saveCurrentUserId(user.id);
       await startBackgroundWatcher();
+      unawaited(PushService.instance.registerCurrentToken());
       return true;
     } on DioException catch (e) {
       // e.response is only set once the server actually replied -- a
@@ -234,6 +245,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   Future<void> logout() async {
+    // Best-effort, before the token that authenticates it is cleared below
+    // -- a failed unregister just means this device keeps getting pushes
+    // for an account it's no longer signed into locally until the next
+    // successful login/logout cycle, not a hard failure worth blocking on.
+    await PushService.instance.unregisterCurrentToken();
     try {
       await _dio.dio.post('/auth/logout');
     } catch (_) {

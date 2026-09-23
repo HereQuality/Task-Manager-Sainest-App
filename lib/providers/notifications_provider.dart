@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -145,6 +146,14 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     for (final t in tasks)
       (t['_id'] ?? t['id'] ?? '').toString(): (t['assigneeId'] is Map ? t['assigneeId']['employeeName'] : null)?.toString(),
   };
+  // Companion to assigneeNameByTaskId above, for the iOS team-task guard
+  // further down -- listMyTasksAll's own populate carries this alongside
+  // employeeName/profilePic now specifically so this lookup is possible.
+  final assigneeManagerIdByTaskId = {
+    for (final t in tasks)
+      (t['_id'] ?? t['id'] ?? '').toString():
+          (t['assigneeId'] is Map ? t['assigneeId']['reportingManagerId'] : null)?.toString(),
+  };
   for (final change in changes) {
     final isMine = currentUserId != null && change.assigneeId == currentUserId;
     if (isMine) {
@@ -155,14 +164,29 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // usually worth knowing about even for someone who's muted the
       // noisier "every edit" stream, or vice versa.
       if (change.isNew ? !settings.taskAssigned : !settings.taskUpdates) continue;
-      final body = change.activityMessage ??
-          (change.isNew ? 'Assigned to you' : 'Task updated') +
-              (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
-      await NotificationService.instance.showTaskUpdateNotification(
-        taskId: change.taskId,
-        title: change.isNew ? 'New task: ${change.title}' : change.title,
-        body: body,
-      );
+      // iOS only: task.controller.js's sendPushToUser sends a real FCM
+      // push for every one of these (new assignment or edit) straight to
+      // this same assignee, and push_service.dart's setForegroundNotification-
+      // PresentationOptions call now makes iOS auto-display that push's
+      // banner itself while foregrounded -- a single OS-wide setting, so
+      // it applies to any notification reaching UNUserNotificationCenter,
+      // not just ones from that source. Posting this local notification
+      // too would put a second, Dart-invisible-to-native-side banner on
+      // screen for the exact same event. Android has no such auto-display
+      // (see push_service.dart's _showForeground), so this remains its
+      // only path. The team-task branch below has no server push
+      // counterpart at all (task.controller.js only pushes to the
+      // assignee) and always needs this regardless of platform.
+      if (!Platform.isIOS) {
+        final body = change.activityMessage ??
+            (change.isNew ? 'Assigned to you' : 'Task updated') +
+                (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
+        await NotificationService.instance.showTaskUpdateNotification(
+          taskId: change.taskId,
+          title: change.isNew ? 'New task: ${change.title}' : change.title,
+          body: body,
+        );
+      }
     } else {
       // Unlike the "isMine" branch above, still skip a change the viewer
       // made themselves to someone ELSE's task (e.g. reassigning a
@@ -170,6 +194,21 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       if (change.isSelfMade) continue;
       if (!settings.teamTaskNotifications) continue;
       if (change.isNew ? !settings.teamTaskAssigned : !settings.teamTaskUpdates) continue;
+      // iOS only, and only a partial overlap with the server push added
+      // to task.controller.js's createTask/createTaskInSpace/updateTask:
+      // that one only ever reaches the assignee's DIRECT manager (same
+      // "1 level up" convention as jobs/overdueEscalation.js), whereas
+      // this branch can fire for ANY subordinate at ANY depth (myTasksProvider
+      // -- "/tasks/mine/all" -- mixes in every subordinate for a senior
+      // role, not just direct reports; see its own doc comment). Skipping
+      // this unconditionally on iOS would silence a senior/SuperAdmin's
+      // multi-level reports entirely, so it only skips when this viewer
+      // IS that direct manager (the one case the new push actually
+      // covers) -- everyone deeper in the chain still needs this local
+      // path since no push reaches them.
+      final isDirectReportOfViewer =
+          currentUserId != null && assigneeManagerIdByTaskId[change.taskId] == currentUserId;
+      if (Platform.isIOS && isDirectReportOfViewer) continue;
       final assigneeName = assigneeNameByTaskId[change.taskId] ?? 'A team member';
       final body = change.activityMessage ??
           (change.isNew ? 'Assigned to $assigneeName' : 'Updated') +
@@ -225,14 +264,23 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       if (!alreadyAlerted && !withinWindow) continue;
       stillEscalatedIds.add(id);
       if (alreadyAlerted) continue;
-      final title = (t['name'] ?? 'Untitled task').toString();
-      final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
-      final spaceName = (t['spaceName'] ?? '').toString();
-      await NotificationService.instance.showTaskUpdateNotification(
-        taskId: 'escalation_$id',
-        title: 'Team overdue: $title',
-        body: '$assigneeName · 1 day overdue${spaceName.isNotEmpty ? ' · $spaceName' : ''}',
-      );
+      // iOS only: jobs/overdueEscalation.js now sends this manager a real
+      // FCM push ("Team overdue: ...") the same moment it stamps
+      // oneDayOverdueEscalatedAt server-side -- iOS already auto-displays
+      // that push's banner (see the isMine-branch guard above for why).
+      // stillEscalatedIds/alreadyAlerted bookkeeping above still has to
+      // run on every platform regardless, so only the local re-post is
+      // skipped here, not the loop itself.
+      if (!Platform.isIOS) {
+        final title = (t['name'] ?? 'Untitled task').toString();
+        final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
+        final spaceName = (t['spaceName'] ?? '').toString();
+        await NotificationService.instance.showTaskUpdateNotification(
+          taskId: 'escalation_$id',
+          title: 'Team overdue: $title',
+          body: '$assigneeName · 1 day overdue${spaceName.isNotEmpty ? ' · $spaceName' : ''}',
+        );
+      }
     }
     await _saveAlertedEscalationIds(stillEscalatedIds);
   }
@@ -267,14 +315,20 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       if (!alreadyAlerted && !withinWindow) continue;
       stillPendingIds.add(id);
       if (alreadyAlerted) continue;
-      final title = (t['name'] ?? 'Untitled task').toString();
-      final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
-      final spaceName = (t['spaceName'] ?? '').toString();
-      await NotificationService.instance.showTaskUpdateNotification(
-        taskId: 'approval_$id',
-        title: 'Approval needed: $title',
-        body: '$assigneeName marked this complete${spaceName.isNotEmpty ? ' · $spaceName' : ''}',
-      );
+      // iOS only: task.controller.js's requestingCompletionAsDelegate
+      // branch already sends the delegator a real "Approval needed" FCM
+      // push the moment this happens -- same reasoning as the isMine-
+      // branch and team-escalations guards above.
+      if (!Platform.isIOS) {
+        final title = (t['name'] ?? 'Untitled task').toString();
+        final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
+        final spaceName = (t['spaceName'] ?? '').toString();
+        await NotificationService.instance.showTaskUpdateNotification(
+          taskId: 'approval_$id',
+          title: 'Approval needed: $title',
+          body: '$assigneeName marked this complete${spaceName.isNotEmpty ? ' · $spaceName' : ''}',
+        );
+      }
     }
     await _saveAlertedApprovalIds(stillPendingIds);
   }

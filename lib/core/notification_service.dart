@@ -79,6 +79,50 @@ class NotificationService {
   final _plugin = FlutterLocalNotificationsPlugin();
   bool _initialized = false;
 
+  // Dedupes showTaskUpdateNotification -- a single real task-created/
+  // task-updated event legitimately reaches it from up to 3 independent
+  // places that all react to the same server event with no coordination
+  // between them: push_service.dart's onMessage (the FCM push itself),
+  // notifications_provider.dart's detectTaskChanges (rebuilt off the
+  // Socket.IO task:created/task:updated listener), and a screen that was
+  // already watching notificationsFeedProvider when the rebuild happened.
+  // Each posts a real OS notification (unlike Android, where the same
+  // notification id just silently replaces the previous one, iOS
+  // re-presents a foreground banner on every single post regardless of
+  // id), so without this a person sees the same banner 2-3 times in a
+  // row. Keyed by the same id show() itself uses, so this exactly matches
+  // "the same notification" rather than needing a second identity scheme.
+  final _recentlyShown = <int, DateTime>{};
+
+  bool _isDuplicate(int notificationId) {
+    final last = _recentlyShown[notificationId];
+    final now = DateTime.now();
+    // The FCM push lands almost instantly, but the Socket.IO-triggered
+    // path (notifications_provider.dart's detectTaskChanges) has to wait
+    // on socket_service.dart's 500ms debounce, then a full /tasks/mine/all
+    // re-fetch, before it reaches this same call -- on a slow/congested
+    // connection that round trip alone can run past 5s, which is what let
+    // a second banner for the same event still slip through at that
+    // window. 25s comfortably covers that fetch while still being far
+    // shorter than any realistic gap between two genuinely separate
+    // updates to the same task.
+    if (last != null && now.difference(last) < const Duration(seconds: 25)) {
+      return true;
+    }
+    _recentlyShown[notificationId] = now;
+    // Unbounded growth guard -- this only ever holds recently-posted
+    // notification ids, so a simple size cap is enough; no need for the
+    // SharedPreferences-persisted "already alerted" machinery the
+    // due-reminder/escalation/approval trackers elsewhere in this file
+    // use, since this is purely about collapsing a same-second race, not
+    // surviving an app restart.
+    if (_recentlyShown.length > 200) {
+      final cutoff = now.subtract(const Duration(minutes: 5));
+      _recentlyShown.removeWhere((_, t) => t.isBefore(cutoff));
+    }
+    return false;
+  }
+
   // AlarmKit (iOS 26+) is what actually gets a full-screen, Do-Not-
   // Disturb-breaking alarm UI on screen while the app is fully killed --
   // DarwinNotificationDetails below (even at .timeSensitive) only ever
@@ -481,15 +525,37 @@ class NotificationService {
     required String title,
     required String body,
   }) async {
+    final notificationId = 'taskupdate_$taskId'.hashCode & 0x7fffffff;
+    if (_isDuplicate(notificationId)) {
+      // ignore: avoid_print
+      print('[NotificationService] showTaskUpdateNotification skipped duplicate: taskId=$taskId title=$title');
+      return;
+    }
     try {
       await _plugin.show(
-        'taskupdate_$taskId'.hashCode & 0x7fffffff,
+        notificationId,
         title,
         body,
-        const NotificationDetails(android: _taskUpdatesChannel, iOS: DarwinNotificationDetails()),
+        const NotificationDetails(
+          android: _taskUpdatesChannel,
+          // presentAlert/Badge/Sound: without these, iOS won't actually
+          // show a banner for a notification posted via _plugin.show()
+          // while the app is in the FOREGROUND -- the local-notification
+          // equivalent of setForegroundNotificationPresentationOptions.
+          // A backgrounded/closed app doesn't need this (the OS displays
+          // remote pushes on its own then), but push_service.dart's
+          // _showForeground only ever runs while foregrounded, so without
+          // this every foreground-received push silently showed nothing.
+          iOS: DarwinNotificationDetails(presentAlert: true, presentBadge: true, presentSound: true),
+        ),
         payload: _taskUpdatePayload(taskId: taskId),
       );
-    } catch (_) {}
+      // ignore: avoid_print
+      print('[NotificationService] showTaskUpdateNotification displayed: taskId=$taskId title=$title');
+    } catch (e) {
+      // ignore: avoid_print
+      print('[NotificationService] showTaskUpdateNotification FAILED: $e');
+    }
   }
 
   // Separate, louder channel for tasks that have actually passed their due
@@ -685,7 +751,17 @@ class NotificationService {
       print(st);
       rethrow;
     }
-    await _scheduleAlarmKitAlarm(taskId: taskId, taskName: taskName, spaceName: spaceName, when: when);
+    // Outer timeout, same reasoning as cancelOverdueAlarm/snoozeOverdueAlarm's
+    // own calls to _cancelAlarmKitAlarm just above -- _scheduleAlarmKitAlarm's
+    // own .timeout(5s) only bounds its _alarmKit.scheduleOneShotAlarm call;
+    // the SharedPreferences writes after it are still an unbounded native
+    // platform-channel round trip each, and this call sits completely
+    // unprotected at every one of its call sites (Snooze among them) unlike
+    // every other native call in this file.
+    try {
+      await _scheduleAlarmKitAlarm(taskId: taskId, taskName: taskName, spaceName: spaceName, when: when)
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {}
   }
 
   /// Looks up the task payload persisted for [alarmId] (see
@@ -754,7 +830,18 @@ class NotificationService {
     try {
       await _plugin.cancel(_alarmId(taskId));
     } catch (_) {}
-    await _cancelAlarmKitAlarm(taskId);
+    // Timeout here too, not just inside _cancelAlarmKitAlarm's own
+    // _alarmKit.cancelAlarm call -- its SharedPreferences.getInstance()/
+    // prefs.remove() calls that sit outside that inner timeout are still
+    // a native platform-channel round trip each, the same kind of call
+    // _markSnoozed's own doc comment already documents as having stalled
+    // on this app before. Without an outer bound here too, one of those
+    // hanging left this exact same "End does nothing, _busy never resets"
+    // stuck-alarm-screen symptom, just one call earlier than the already-
+    // protected AlarmKit call itself.
+    try {
+      await _cancelAlarmKitAlarm(taskId).timeout(const Duration(seconds: 5));
+    } catch (_) {}
     // Writes taskId into the shared "already alerted" record DIRECTLY,
     // right here, rather than only relying on notifications_provider.dart/
     // background_watcher_service.dart's own polling passes to eventually
@@ -886,7 +973,12 @@ class NotificationService {
     try {
       await _plugin.cancel(_alarmId(taskId));
     } catch (_) {}
-    await _cancelAlarmKitAlarm(taskId);
+    // Same outer timeout as cancelOverdueAlarm's own call to this -- see
+    // its doc comment for why the plain (untimed) call below it isn't
+    // enough on its own.
+    try {
+      await _cancelAlarmKitAlarm(taskId).timeout(const Duration(seconds: 5));
+    } catch (_) {}
 
     // Best-effort, same reasoning as _cancelAlarmKitAlarm's own timeout
     // above: this is bookkeeping only (see _alertedOverdueIdsKey/
