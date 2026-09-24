@@ -29,3 +29,53 @@ Future<Map<String, dynamic>?> fetchEmployeeSpace(String employeeId) async {
   final data = res.data['data'];
   return data is Map ? Map<String, dynamic>.from(data) : null;
 }
+
+Set<String>? _cachedVisibleSpaceIds;
+DateTime? _cachedVisibleSpaceIdsAt;
+
+/// Plain (non-Riverpod) counterpart to spacesProvider above, for
+/// background_watcher_service.dart's polling isolate, which can't watch a
+/// FutureProvider -- and for notifications_provider.dart's foreground
+/// pass, which could `ref.watch(spacesProvider.future)` directly but uses
+/// this instead so both paths share one cache/TTL instead of each hitting
+/// GET /spaces independently.
+///
+/// The ids returned are exactly "Spaces this account can see" -- every
+/// active Space it's a member of, or literally every active Space for
+/// SuperAdmin/a role with Full Access on Teams (see space.controller.js#
+/// listMySpaces, the same endpoint this calls). Used to gate "team task"
+/// notifications (see TaskChangeResult.spaceId's doc comment) to Spaces
+/// the viewer is actually part of, rather than every Space any direct/
+/// indirect report happens to have a task in.
+///
+/// Cached 5 minutes, same window fetchNotificationSchedule uses -- this
+/// is consulted on every tick (once a minute for the background watcher),
+/// and someone's own Space membership changes rarely enough that a few
+/// minutes of staleness is a non-issue, while re-fetching it every single
+/// tick would be pure waste.
+Future<Set<String>> fetchMyVisibleSpaceIds({bool forceRefresh = false}) async {
+  final now = DateTime.now();
+  if (!forceRefresh &&
+      _cachedVisibleSpaceIds != null &&
+      _cachedVisibleSpaceIdsAt != null &&
+      now.difference(_cachedVisibleSpaceIdsAt!) < const Duration(minutes: 5)) {
+    return _cachedVisibleSpaceIds!;
+  }
+  try {
+    final res = await ApiClient.instance.dio.get('/spaces').timeout(const Duration(seconds: 8));
+    final data = List<Map<String, dynamic>>.from(res.data['data'] ?? []);
+    final ids = data.map((s) => s['_id']?.toString()).whereType<String>().toSet();
+    _cachedVisibleSpaceIds = ids;
+    _cachedVisibleSpaceIdsAt = now;
+    return ids;
+  } catch (_) {
+    // Best-effort, same reasoning as fetchNotificationSchedule's own
+    // catch: falls back to whatever was last cached (or, on a totally
+    // fresh app instance with no cache yet, an empty set) rather than
+    // throwing and taking the whole notification-check tick down with
+    // it. An empty set under-notifies (no team task ever fires) rather
+    // than over-notifies, which is the safer failure direction for
+    // something gating what's allowed to reach the person at all.
+    return _cachedVisibleSpaceIds ?? <String>{};
+  }
+}

@@ -9,6 +9,7 @@ import '../core/task_update_tracker.dart';
 import '../models/notification_item.dart';
 import 'auth_provider.dart';
 import 'settings_provider.dart';
+import 'spaces_provider.dart';
 import 'tasks_provider.dart';
 import 'tickets_provider.dart';
 
@@ -137,6 +138,11 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   // background_watcher_service.dart's matching fix.
   final currentUserId = ref.watch(authProvider).user?.id;
   final changes = await detectTaskChanges(tasks, currentUserId: currentUserId);
+  // Gates the "team task" branch below to Spaces this viewer can actually
+  // see (member, SuperAdmin, or Full Access) -- see TaskChangeResult.
+  // spaceId's own doc comment for why listMyTasksAll's broader "every
+  // report's task, any Space" visibility isn't the right scope for a push.
+  final visibleSpaceIds = await fetchMyVisibleSpaceIds();
   // myTasksProvider ("/tasks/mine/all") mixes a manager/senior's own
   // tasks together with every subordinate's (see
   // task.controller.js#listMyTasksAll) -- this map is what tells "my
@@ -192,6 +198,13 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // made themselves to someone ELSE's task (e.g. reassigning a
       // teammate's task) -- see TaskChangeResult.isSelfMade's doc comment.
       if (change.isSelfMade) continue;
+      // A report's task can sit in a Space this viewer isn't a member of
+      // (listMyTasksAll surfaces it anyway, for oversight) -- but a push
+      // about it shouldn't reach someone who couldn't even open that
+      // Space themselves. change.spaceId is null defensively falls open
+      // (still notifies) rather than silently dropping a legitimate one
+      // if the field's ever missing from a task payload.
+      if (change.spaceId != null && !visibleSpaceIds.contains(change.spaceId)) continue;
       if (!settings.teamTaskNotifications) continue;
       if (change.isNew ? !settings.teamTaskAssigned : !settings.teamTaskUpdates) continue;
       // iOS only, and only a partial overlap with the server push added

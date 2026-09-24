@@ -31,6 +31,15 @@ class TaskChangeResult {
   // separate myTask*/teamTask* toggles), since myTasksProvider's task
   // list already mixes both together for a manager/senior.
   final String? assigneeId;
+  // Which Space this task lives in -- lets a caller restrict "team task"
+  // notifications (see TaskChangeResult's assigneeId doc comment) to only
+  // Spaces the viewer is actually a member of (or has Full Access to).
+  // listMyTasksAll deliberately surfaces every direct/indirect report's
+  // task regardless of Space, for manager oversight/dashboard purposes --
+  // that's correct for what's VISIBLE in-app, but a push notification
+  // about a Space someone isn't even a member of goes further than that
+  // oversight was ever meant to reach.
+  final String? spaceId;
   // Whether the latest activityLog entry was authored by the same person
   // viewing this device (see _latestActivityActorId below). Callers use
   // this to still suppress "you edited a teammate's task" (nobody needs a
@@ -47,6 +56,7 @@ class TaskChangeResult {
     required this.isNew,
     this.activityMessage,
     this.assigneeId,
+    this.spaceId,
     this.isSelfMade = false,
   });
 }
@@ -103,6 +113,7 @@ Future<List<TaskChangeResult>> detectTaskChanges(
     final title = (t['title'] ?? t['name'] ?? 'Untitled task').toString();
     final id = (t['_id'] ?? t['id'] ?? title).toString();
     final spaceName = (t['spaceName'] ?? '').toString();
+    final spaceId = t['spaceId']?.toString();
     final assigneeRaw = t['assigneeId'];
     final assigneeId = (assigneeRaw is Map ? assigneeRaw['_id'] : assigneeRaw)?.toString();
 
@@ -119,6 +130,7 @@ Future<List<TaskChangeResult>> detectTaskChanges(
           isNew: true,
           activityMessage: _latestActivityMessage(t),
           assigneeId: assigneeId,
+          spaceId: spaceId,
           isSelfMade: isSelfMade,
         ));
       }
@@ -133,6 +145,7 @@ Future<List<TaskChangeResult>> detectTaskChanges(
         isNew: false,
         activityMessage: _latestActivityMessage(t),
         assigneeId: assigneeId,
+        spaceId: spaceId,
         isSelfMade: isSelfMade,
       ));
     }

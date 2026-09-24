@@ -10,6 +10,7 @@ import 'api_client.dart';
 import 'notification_schedule.dart';
 import 'notification_service.dart';
 import 'task_update_tracker.dart';
+import '../providers/spaces_provider.dart';
 import '../providers/tasks_provider.dart';
 
 // Same key notifications_provider.dart uses for its own catch-up tracking
@@ -572,6 +573,9 @@ Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, Notificatio
     for (final t in tasks)
       (t['_id'] ?? t['id'] ?? '').toString(): (t['assigneeId'] is Map ? t['assigneeId']['employeeName'] : null)?.toString(),
   };
+  // Same gate as notifications_provider.dart's foreground pass -- see
+  // TaskChangeResult.spaceId's doc comment (task_update_tracker.dart).
+  final visibleSpaceIds = await fetchMyVisibleSpaceIds();
   for (final change in await detectTaskChanges(tasks, currentUserId: currentUserId)) {
     final isMine = currentUserId != null && change.assigneeId == currentUserId;
     if (isMine) {
@@ -590,6 +594,7 @@ Future<void> _checkTaskUpdatesOnce(List<Map<String, dynamic>> tasks, Notificatio
       // made themselves to someone ELSE's task -- see TaskChangeResult.
       // isSelfMade's doc comment (task_update_tracker.dart).
       if (change.isSelfMade) continue;
+      if (change.spaceId != null && !visibleSpaceIds.contains(change.spaceId)) continue;
       if (!teamTaskAllowed) continue;
       if (change.isNew ? !teamAssignedAllowed : !teamUpdatesAllowed) continue;
       final assigneeName = assigneeNameByTaskId[change.taskId] ?? 'A team member';
