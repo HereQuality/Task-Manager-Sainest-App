@@ -8,7 +8,7 @@ import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
 import '../providers/notifications_provider.dart';
 import '../providers/projects_provider.dart';
-import '../providers/spaces_provider.dart';
+import '../providers/spaces_provider.dart' show fetchEmployeeSpace, fetchAllEmployeeSpaces, spacesProvider;
 import '../providers/tasks_provider.dart';
 import 'searchable_employee_field.dart';
 import 'time_picker_sheet.dart';
@@ -23,7 +23,10 @@ class _AddTaskResult {
   final DateTime? reminderAt;
   final List<DateTime> extraReminders;
   final String? priority;
-  final String? assigneeId;
+  // One task gets created PER id in here (see showAddTaskSheet) -- not one
+  // task shared by several assignees, since Task.assigneeId is a single
+  // value. Empty means an unassigned task, same as before this was a list.
+  final List<String> assigneeIds;
   final String? projectId;
   _AddTaskResult({
     required this.name,
@@ -33,9 +36,18 @@ class _AddTaskResult {
     this.reminderAt,
     this.extraReminders = const [],
     this.priority,
-    this.assigneeId,
+    this.assigneeIds = const [],
     this.projectId,
   });
+}
+
+/// One (assignee, Team) pair showAddTaskSheet below actually creates a
+/// task for -- see its own doc comment on why a single ticked assignee can
+/// expand into several of these.
+class _AddTaskTarget {
+  final String? assigneeId;
+  final String? spaceId;
+  const _AddTaskTarget({required this.assigneeId, required this.spaceId});
 }
 
 /// The "+" slot in the bottom nav (see home_shell.dart) opens this instead
@@ -64,24 +76,69 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
 
   if (result == null) return;
 
-  final taskId = await createTaskInSpace(
-    result.spaceId,
-    name: result.name,
-    startDate: result.startDate,
-    dueDate: result.dueDate,
-    reminderAt: result.reminderAt,
-    extraReminders: result.extraReminders,
-    priority: result.priority,
-    projectId: result.projectId,
-  );
-  // Two-step on purpose when an assignee was picked -- see
-  // assignTaskAndMoveSpace's own doc comment: this is what actually gets
-  // the task into that person's real team even when they're on a
-  // different team than whoever's creating it (the Space picker above
-  // only ever lists Spaces THIS account can see, so it may not even have
-  // offered the assignee's real team as an option).
-  if (result.assigneeId != null && taskId.isNotEmpty) {
-    await assignTaskAndMoveSpace(taskId, result.assigneeId!);
+  // Expands each ticked assignee into one target per TEAM they actually
+  // belong to -- someone split across two Teams needs a separate task in
+  // each, not a guess at just one (see fetchAllEmployeeSpaces' own doc
+  // comment). Someone in zero Teams still gets exactly one task, assigned
+  // to them but left in the placeholder Space below (same fallback as
+  // before this per-Team expansion existed). No assignees ticked at all
+  // means exactly one unassigned task, same as ever.
+  final targets = <_AddTaskTarget>[];
+  if (result.assigneeIds.isEmpty) {
+    targets.add(const _AddTaskTarget(assigneeId: null, spaceId: null));
+  } else {
+    for (final assigneeId in result.assigneeIds) {
+      List<Map<String, dynamic>> teams;
+      try {
+        teams = await fetchAllEmployeeSpaces(assigneeId);
+      } catch (_) {
+        teams = const [];
+      }
+      if (teams.isEmpty) {
+        targets.add(_AddTaskTarget(assigneeId: assigneeId, spaceId: null));
+      } else {
+        for (final team in teams) {
+          targets.add(_AddTaskTarget(assigneeId: assigneeId, spaceId: team['_id']?.toString()));
+        }
+      }
+    }
+  }
+
+  // One task per target above -- each created and relocated completely
+  // independently via the same create-then-assign flow a single assignee
+  // already used, so ticking several people (or one person in several
+  // Teams) never produces one task shared between them. A failed copy
+  // doesn't stop the rest; `failed` is surfaced in the closing snack bar
+  // so a partial batch is never silently reported as fully successful.
+  var created = 0;
+  var failed = 0;
+  for (final target in targets) {
+    try {
+      final taskId = await createTaskInSpace(
+        result.spaceId,
+        name: result.name,
+        startDate: result.startDate,
+        dueDate: result.dueDate,
+        reminderAt: result.reminderAt,
+        extraReminders: result.extraReminders,
+        priority: result.priority,
+        projectId: result.projectId,
+      );
+      // Two-step on purpose when an assignee was picked -- see
+      // assignTaskAndMoveSpace's own doc comment: this is what actually
+      // gets the task into that person's real team even when they're on a
+      // different team than whoever's creating it (the Space picker above
+      // only ever lists Spaces THIS account can see, so it may not even
+      // have offered the assignee's real team as an option). targetSpaceId
+      // pins it to the EXACT Team this target is for, when there's more
+      // than one to choose from.
+      if (target.assigneeId != null && taskId.isNotEmpty) {
+        await assignTaskAndMoveSpace(taskId, target.assigneeId!, targetSpaceId: target.spaceId);
+      }
+      created += 1;
+    } catch (_) {
+      failed += 1;
+    }
   }
   ref.invalidate(myTasksProvider);
   ref.invalidate(dashboardStatsProvider);
@@ -94,7 +151,12 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
   // otherwise, unlike Android's background_watcher_service.dart).
   unawaited(ref.read(notificationsFeedProvider.future));
   if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Task added')));
+    final message = targets.length <= 1
+        ? (created > 0 ? 'Task added' : 'Failed to add task')
+        : failed > 0
+            ? '$created task${created == 1 ? '' : 's'} added, $failed failed'
+            : '$created tasks added';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 }
 
@@ -108,14 +170,27 @@ class _AddTaskSheetContent extends ConsumerStatefulWidget {
 class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   final _nameCtrl = TextEditingController();
   String? _spaceId;
-  String? _assigneeId;
+  // Ticking several people here makes showAddTaskSheet create one
+  // completely separate task per person instead of a single shared one
+  // (see its own doc comment) -- nothing on screen or on the server links
+  // those copies together once they're created.
+  List<String> _assigneeIds = [];
   // The chosen assignee's own Space, fetched via fetchEmployeeSpace the
   // moment they're picked -- kept separately from spacesAsync's own list
   // (which only ever holds Spaces THIS account can see) so it can be
   // merged into the Space dropdown's items below even when it's a team
   // this account otherwise has no visibility into at all. Null while
-  // loading or if the assignee isn't in any Space yet.
+  // loading, if the assignee isn't in any Space yet, or if several people
+  // are selected (which Space to preview then isn't well-defined -- see
+  // _onAssigneesChanged).
   Map<String, dynamic>? _assigneeSpace;
+  // Every selected assignee's full Team list, keyed by their id -- powers
+  // the "who's going to which Team" preview shown under the Assign to
+  // field, and is exactly what showAddTaskSheet itself re-fetches (fresh,
+  // not from this UI-only cache) to decide how many task copies to make.
+  // An empty (not missing) entry means that lookup finished and genuinely
+  // found no Team; a missing entry means it's still loading.
+  final Map<String, List<Map<String, dynamic>>> _assigneeTeamsById = {};
   String? _projectId;
   String? _priority;
   DateTime? _startDate;
@@ -136,8 +211,11 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   // (or is still in flight) -- e.g. quickly picking Person A then Person
   // B before A's lookup returns.
   int _assigneeSpaceRequestToken = 0;
+  // Same bumped-counter guard as _assigneeSpaceRequestToken above, for the
+  // per-person Team-list preview fetches below.
+  int _assigneeTeamsRequestToken = 0;
 
-  // Picking an Assign To person looks up their own Space (GET /spaces/
+  // Picking Assign To person(s) looks up their own Space (GET /spaces/
   // for-employee/:id -- see fetchEmployeeSpace's own doc comment) so the
   // Space field below can show/select the CORRECT team even when this
   // account has no visibility into it at all (a non-Full-Access person
@@ -146,27 +224,78 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
   // this succeeding -- see showAddTaskSheet's assignTaskAndMoveSpace call,
   // which resolves it server-side regardless -- this only fixes what the
   // picker DISPLAYS while filling out the form.
-  Future<void> _onAssigneeChanged(String? v) async {
-    final token = ++_assigneeSpaceRequestToken;
+  //
+  // Only previewed for exactly one selected person -- with several people
+  // ticked, each ends up in their OWN Space once the separate tasks are
+  // created (see showAddTaskSheet), so there's no single "the" Space to
+  // preview here; the field just falls back to showing/letting this
+  // account pick its own default Space as the placeholder used while
+  // creating each copy.
+  Future<void> _onAssigneesChanged(List<String> ids) async {
+    final spaceToken = ++_assigneeSpaceRequestToken;
+    final teamsToken = ++_assigneeTeamsRequestToken;
     setState(() {
-      _assigneeId = v;
+      _assigneeIds = ids;
       _assigneeSpace = null;
+      // Drop any cached Team list for someone who just got unticked, so a
+      // re-tick later fetches fresh rather than reading stale data --
+      // membership can change between picks within the same open sheet.
+      _assigneeTeamsById.removeWhere((id, _) => !ids.contains(id));
     });
-    if (v == null) return;
-    Map<String, dynamic>? space;
-    try {
-      space = await fetchEmployeeSpace(v);
-    } catch (_) {
-      // Best-effort display only -- a failed lookup just leaves the
-      // Space field showing whatever it already had (or blank), same as
-      // before this feature existed. The task itself still ends up in
-      // the right place either way (see assignTaskAndMoveSpace).
-      return;
+
+    if (ids.length == 1) {
+      Map<String, dynamic>? space;
+      try {
+        space = await fetchEmployeeSpace(ids.first);
+      } catch (_) {
+        // Best-effort display only -- a failed lookup just leaves the
+        // Space field showing whatever it already had (or blank), same as
+        // before this feature existed. The task itself still ends up in
+        // the right place either way (see assignTaskAndMoveSpace).
+        space = null;
+      }
+      if (mounted && spaceToken == _assigneeSpaceRequestToken) {
+        setState(() {
+          _assigneeSpace = space;
+          if (space != null) _spaceId = space['_id']?.toString();
+        });
+      }
+    } else if (_spaceId == null) {
+      // Zero or several assignees ticked -- there's no single "the"
+      // person's Space to auto-fill here (see this function's own doc
+      // comment above), but _submit() still requires SOME Space picked
+      // before it'll let the form through. Falls back to this account's
+      // own first available Space, purely as the placeholder
+      // createTaskInSpace creates into -- showAddTaskSheet's per-target
+      // assignTaskAndMoveSpace call is what actually relocates each copy
+      // to the right Team afterward, so this placeholder never affects
+      // where a task ends up once an assignee is picked. Left untouched
+      // if something (a previous single pick, or a manual choice) already
+      // set one.
+      final spaces = ref.read(spacesProvider).valueOrNull;
+      if (mounted && spaces != null && spaces.isNotEmpty) {
+        setState(() => _spaceId ??= spaces.first['_id']?.toString());
+      }
     }
-    if (!mounted || token != _assigneeSpaceRequestToken) return;
+
+    // "Which Team(s) will this actually go to" preview, for every newly
+    // ticked id this device hasn't already looked up -- see
+    // _assigneeTeamsById's own doc comment. Fetched in parallel since
+    // each is an independent lookup.
+    final toFetch = ids.where((id) => !_assigneeTeamsById.containsKey(id)).toList();
+    if (toFetch.isEmpty) return;
+    final fetched = await Future.wait(toFetch.map((id) async {
+      try {
+        return MapEntry(id, await fetchAllEmployeeSpaces(id));
+      } catch (_) {
+        return MapEntry(id, const <Map<String, dynamic>>[]);
+      }
+    }));
+    if (!mounted || teamsToken != _assigneeTeamsRequestToken) return;
     setState(() {
-      _assigneeSpace = space;
-      if (space != null) _spaceId = space['_id']?.toString();
+      for (final entry in fetched) {
+        _assigneeTeamsById[entry.key] = entry.value;
+      }
     });
   }
 
@@ -340,7 +469,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
         reminderAt: reminderDateTime,
         extraReminders: _extraReminders,
         priority: _priority,
-        assigneeId: _assigneeId,
+        assigneeIds: _assigneeIds,
         projectId: _projectId,
       ),
     );
@@ -378,12 +507,12 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             // natural first step, and which Space it then lands in
             // follows from that instead of being picked blind first.
             employeesAsync.when(
-              data: (employees) => SearchableEmployeeField(
+              data: (employees) => MultiSearchableEmployeeField(
                 label: 'Assign to',
                 employees: employees,
-                value: _assigneeId,
+                value: _assigneeIds,
                 currentUserId: currentUserId,
-                onChanged: (v) => _onAssigneeChanged(v),
+                onChanged: (ids) => _onAssigneesChanged(ids),
               ),
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
@@ -391,6 +520,44 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
               ),
               error: (e, _) => Text('Could not load employees.', style: Theme.of(context).textTheme.bodyMedium),
             ),
+            // "Who's actually getting which Team" preview -- shows up the
+            // instant each person is ticked (see _onAssigneesChanged), so
+            // it's obvious BEFORE hitting "Add task" that someone split
+            // across two Teams is about to get two separate task copies,
+            // one per Team, rather than that only becoming visible after
+            // the fact in the task lists themselves.
+            if (_assigneeIds.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: Gap.xs),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final id in _assigneeIds)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: Builder(builder: (context) {
+                          final employees = employeesAsync.value ?? const [];
+                          final match = employees.where((e) => e['_id'] == id);
+                          final name = id == currentUserId
+                              ? 'Me'
+                              : (match.isNotEmpty ? match.first['employeeName']?.toString() : null) ?? '...';
+                          final teams = _assigneeTeamsById[id];
+                          final teamsText = teams == null
+                              ? 'looking up team…'
+                              : teams.isEmpty
+                                  ? 'not in any team yet -- will stay here'
+                                  : teams.length == 1
+                                      ? '${teams.first['name']}'
+                                      : '${teams.length} teams: ${teams.map((t) => t['name']).join(', ')}';
+                          return Text(
+                            '$name → $teamsText',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.inkMuted),
+                          );
+                        }),
+                      ),
+                  ],
+                ),
+              ),
             const SizedBox(height: Gap.md),
 
             // Optional -- a task doesn't have to belong to a Project. Every
@@ -548,6 +715,20 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
             // still shown, and still changeable by hand, since a Space is
             // required either way and this is also the only way to set
             // one before an assignee's been picked at all.
+            //
+            // Hidden entirely once 2+ people are ticked: at that point
+            // _spaceId is just an internal placeholder (see
+            // _onAssigneesChanged's else branch) that createTaskInSpace
+            // uses to create EACH copy before it gets relocated to that
+            // specific person's actual Team -- showing it here read as
+            // "this task is going to Accounts" even when the "Me -> Dumy /
+            // Bhim Rai -> Dumy" preview right above already says
+            // otherwise, which is exactly the confusing, wrong-looking
+            // mismatch this avoids. The per-person preview above is the
+            // real answer once there's more than one assignee; this
+            // dropdown only still means something when there's at most
+            // one.
+            if (_assigneeIds.length <= 1)
             spacesAsync.when(
               data: (spaces) {
                 // Merges in the chosen assignee's own Space

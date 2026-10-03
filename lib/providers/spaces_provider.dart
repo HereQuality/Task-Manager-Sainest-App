@@ -30,6 +30,22 @@ Future<Map<String, dynamic>?> fetchEmployeeSpace(String employeeId) async {
   return data is Map ? Map<String, dynamic>.from(data) : null;
 }
 
+/// EVERY (active) Space a given employee belongs to -- GET /api/v1/spaces/
+/// for-employee/:employeeId/all. Someone can be a member of more than one
+/// Team; fetchEmployeeSpace above only ever returns one of them (whichever
+/// the server happens to return first), which is fine for the single-
+/// assignee Add Task flow but not for the multi-assignee one, where a
+/// person selected with two Teams needs to produce two separate tasks --
+/// one per Team -- not a guess at just one. See add_task_sheet.dart's
+/// showAddTaskSheet for where this drives that expansion, and
+/// task.controller.js#updateTask's targetSpaceId param for how a specific
+/// one of these is then actually used when creating each copy.
+Future<List<Map<String, dynamic>>> fetchAllEmployeeSpaces(String employeeId) async {
+  final res = await ApiClient.instance.dio.get('/spaces/for-employee/$employeeId/all');
+  final data = res.data['data'];
+  return data is List ? List<Map<String, dynamic>>.from(data) : [];
+}
+
 Set<String>? _cachedVisibleSpaceIds;
 DateTime? _cachedVisibleSpaceIdsAt;
 

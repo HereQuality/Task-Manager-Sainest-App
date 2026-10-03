@@ -439,9 +439,17 @@ Future<String> createTaskInSpace(
 /// that dropdown to begin with -- this lets the server, which has full
 /// visibility, resolve and move it correctly regardless of what this
 /// account could see.
-Future<void> assignTaskAndMoveSpace(String taskId, String assigneeId) async {
+/// [targetSpaceId] disambiguates which of the assignee's Spaces to use
+/// when they belong to more than one -- without it, the server just picks
+/// whichever one Mongo happens to return first (see task.controller.js#
+/// updateTask's own doc comment on this param). The multi-assignee Add
+/// Task flow (add_task_sheet.dart) passes this explicitly, one call per
+/// Team a selected person actually belongs to, so each resulting task
+/// copy lands in the right one.
+Future<void> assignTaskAndMoveSpace(String taskId, String assigneeId, {String? targetSpaceId}) async {
   await ApiClient.instance.dio.put('/tasks/$taskId', data: {
     'assigneeId': assigneeId,
     'moveToAssigneeSpace': true,
+    if (targetSpaceId != null) 'targetSpaceId': targetSpaceId,
   });
 }
