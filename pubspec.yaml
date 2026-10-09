@@ -1,7 +1,7 @@
 name: hqepl_mobile
 description: Q Task360 mobile companion app (Tasks, Tickets, Calendar, Team)
 publish_to: 'none'
-version: 1.1.1+71
+version: 1.1.3+73
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -88,6 +88,15 @@ dependencies:
   # ever having to trust a compile-time constant for something this
   # consequential).
   package_info_plus: ^8.1.2
+  # Reads the phone's manufacturer (Build.MANUFACTURER on Android) so the
+  # "background reliability" settings card can show OEM-specific written
+  # instructions (Autostart/Battery/Recents-lock) -- the best-effort
+  # direct-jump intents in notification_service.dart's
+  # openAutoStartSettings() guess at known OEM settings-activity names,
+  # which OEMs rename/move across firmware versions without notice, so a
+  # written fallback that doesn't depend on guessing right is what
+  # actually keeps this usable as those guesses go stale.
+  device_info_plus: ^11.2.0
   # Realtime task events (task:created/task:updated) from the same
   # Socket.IO server the web app already connects to (server/config/
   # socket.js, client/src/lib/socket.js) -- see socket_service.dart.

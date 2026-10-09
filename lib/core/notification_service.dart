@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:android_intent_plus/android_intent.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_alarmkit/flutter_alarmkit.dart';
@@ -273,8 +274,27 @@ class NotificationService {
       ['com.coloros.safecenter', 'com.coloros.safecenter.permission.startup.StartupAppListActivity'],
       ['com.oppo.safe', 'com.oppo.safe.permission.startup.StartupAppListActivity'],
       ['com.coloros.safecenter', 'com.coloros.safecenter.startupapp.StartupAppListActivity'],
+      // Newer Oppo/OnePlus firmware (ColorOS 13+ / OxygenOS 13+) rebranded
+      // the security-center package from "coloros" to "oplus" -- the
+      // vivo/iqoo/coloros candidates above cover older and mid-generation
+      // OnePlus builds (OnePlus genuinely shares ColorOS internals since
+      // the OxygenOS/ColorOS merger), these two are the best-effort
+      // reverse-engineered equivalents for the newest ones. Unconfirmed
+      // against every firmware build (OEMs don't publish these), but
+      // harmless to try -- a wrong/missing component just throws and
+      // falls through to the next candidate like any other entry here.
+      ['com.oplus.safecenter', 'com.oplus.safecenter.startupapp.StartupAppListActivity'],
+      ['com.oplus.securitypermission', 'com.oplus.securitypermission.startupapp.StartupAppListActivity'],
       ['com.huawei.systemmanager', 'com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity'],
       ['com.oneplus.security', 'com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity'],
+      // Samsung has no single well-known "autostart" activity the way
+      // Chinese OEMs do -- its equivalent lives inside Device Care's
+      // battery screen ("Background usage limits" / "Never sleeping
+      // apps"), reached the same generic way regardless of model. No
+      // Samsung-specific candidate is listed here for that reason; it
+      // falls through to the App Info screen below like any unmatched
+      // OEM, and getBackgroundReliabilityManufacturerHint() gives
+      // Samsung its own written steps instead of a guessed intent.
     ];
     for (final c in candidates) {
       try {
@@ -305,6 +325,78 @@ class NotificationService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// Build.MANUFACTURER, cached for the process lifetime -- used to pick
+  /// which written fallback instructions getBackgroundReliabilitySteps
+  /// shows. Reading this is cheap and synchronous-ish via device_info_plus,
+  /// but still async under the hood (platform channel), so it's fetched
+  /// once and reused rather than on every Settings-screen rebuild.
+  String? _cachedManufacturer;
+  Future<String> _manufacturer() async {
+    if (!Platform.isAndroid) return '';
+    if (_cachedManufacturer != null) return _cachedManufacturer!;
+    try {
+      final info = await DeviceInfoPlugin().androidInfo;
+      _cachedManufacturer = info.manufacturer.toLowerCase();
+    } catch (_) {
+      _cachedManufacturer = '';
+    }
+    return _cachedManufacturer!;
+  }
+
+  /// Written, manufacturer-specific steps for reaching this phone's own
+  /// Autostart/Background-activity/Recents-lock controls BY HAND --
+  /// openAutoStartSettings() above tries to jump straight there, but it's
+  /// a best-effort guess at settings-activity names OEMs rename or move
+  /// across firmware versions with no warning and no public API to
+  /// detect. Unlike that guess, these steps don't depend on getting an
+  /// internal component name right, so they stay correct even when the
+  /// shortcut above silently falls through to the generic App Info
+  /// screen. Called once (manufacturer is cached) and shown regardless of
+  /// whether the shortcut intent "succeeded," since launching an intent
+  /// successfully is no guarantee it landed on the right screen.
+  Future<List<String>> getBackgroundReliabilitySteps() async {
+    final m = await _manufacturer();
+    if (m.contains('oneplus') || m.contains('oppo') || m.contains('realme')) {
+      return const [
+        'Settings → Battery → look for "App battery management" or "Background usage limits" → find this app → set it to allow background activity (not "Restrict"/"Optimized").',
+        'Settings → search "Autostart" (sometimes listed under Apps, or inside the Battery screen above) → turn it on for this app.',
+        'Open Recents (the multitasking/app-switcher view) → find this app\'s card → tap the padlock icon on it to lock it there.',
+        'If the phone has a whole-device "Battery saver" or "Advanced/Deep Optimization" mode turned on, these per-app settings may be greyed out until that\'s switched off.',
+      ];
+    }
+    if (m.contains('xiaomi') || m.contains('redmi') || m.contains('poco')) {
+      return const [
+        'Settings → Apps → Manage apps → find this app → Battery saver → set to "No restrictions."',
+        'Same app page → Autostart → turn it on.',
+        'Open Recents → swipe down (or long-press) on this app\'s card → tap the lock icon to keep it from being cleared.',
+      ];
+    }
+    if (m.contains('vivo')) {
+      return const [
+        'Settings → Battery → Background power consumption management (or "High background power consumption") → find this app → allow it.',
+        'Settings → search "Autostart" (i Manager app also has this) → turn it on for this app.',
+        'Open Recents → find this app\'s card → tap the lock icon.',
+      ];
+    }
+    if (m.contains('huawei') || m.contains('honor')) {
+      return const [
+        'Settings → Apps → this app → Battery → set "Launch" to manual, then turn ON all three of Auto-launch, Secondary launch, and Run in background.',
+        'Settings → Battery → App launch → same screen as above, double-check it stuck.',
+      ];
+    }
+    if (m.contains('samsung')) {
+      return const [
+        'Settings → Apps → this app → Battery → set to "Unrestricted" (not "Optimised" or "Restricted").',
+        'Settings → Device care → Battery → Background usage limits → make sure this app is NOT listed under "Sleeping apps"/"Deep sleeping apps" — remove it if it is.',
+      ];
+    }
+    return const [
+      'Check your phone\'s Settings → Battery (or Device care) for a per-app "background activity"/"background usage" control and allow it for this app.',
+      'Check Settings for an "Autostart"/"Auto-launch" permission list and enable it for this app, if your phone has one.',
+      'Open Recents (multitasking view), find this app\'s card, and lock it there if a lock/pin option is available.',
+    ];
   }
 
   /// Checks (and if needed, asks for) Android 14's dedicated "Full screen

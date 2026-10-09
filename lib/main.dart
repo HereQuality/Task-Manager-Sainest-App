@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -24,6 +25,14 @@ Future<void> main() async {
   // ignore: avoid_print
   print('[Firebase] initialized: ${Firebase.app().name}, projectId=${Firebase.app().options.projectId}, '
       'appId=${Firebase.app().options.appId}');
+  // Must be registered here (top-level, before runApp) per FCM's own
+  // requirement -- firebaseMessagingBackgroundHandler (push_service.dart)
+  // is what lets the server's overdueAlarmPush job (jobs/overdueAlarmPush.js)
+  // ring the full-screen overdue alarm even when this app has been fully
+  // closed/killed, not just backgrounded. Android-relevant mainly (where
+  // the background-watcher/battery-manager problem this exists for
+  // actually happens); harmless no-op path on iOS otherwise.
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   // Fire-and-forget, started as early as possible -- deliberately NOT
   // awaited here (a network round trip blocking the very first frame
   // would violate this file's own "the person needs to see the app

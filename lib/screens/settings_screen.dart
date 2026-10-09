@@ -73,16 +73,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> with WidgetsBin
     ));
   }
 
+  // Always shows the manufacturer's own written steps first, with the
+  // direct-jump shortcut as a convenience button inside the dialog rather
+  // than the primary action -- openAutoStartSettings()'s intent "succeeding"
+  // only means SOME screen opened, never that it's the right one (OEMs
+  // rename/move these with every firmware update, with no way for this app
+  // to confirm it landed correctly), so leading with a snackbar that only
+  // appears on outright failure left people on the wrong screen with no
+  // guidance whenever the guess was wrong but not completely absent.
   Future<void> _openAutoStart() async {
-    final opened = await NotificationService.instance.openAutoStartSettings();
-    if (mounted) {
-      setState(() => _autoStartTried = true);
-      if (!opened) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text("Couldn't find an autostart screen for this phone — check its own Settings/App management app manually."),
-        ));
-      }
-    }
+    final steps = await NotificationService.instance.getBackgroundReliabilitySteps();
+    if (!mounted) return;
+    setState(() => _autoStartTried = true);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Keep alarms working when closed'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'These settings live in your phone\'s own Settings app, not this one — steps below for your phone:',
+              ),
+              const SizedBox(height: Gap.md),
+              for (final step in steps)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Gap.sm),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('•  '),
+                      Expanded(child: Text(step)),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.of(dialogContext).pop();
+              final opened = await NotificationService.instance.openAutoStartSettings();
+              if (!opened && mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text("Couldn't jump straight there — follow the steps above manually."),
+                ));
+              }
+            },
+            child: const Text('Try jumping there'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _sendTestAlarm() async {

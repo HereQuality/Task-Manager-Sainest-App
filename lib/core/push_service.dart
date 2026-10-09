@@ -1,9 +1,57 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import '../firebase_options.dart';
 import 'api_client.dart';
 import 'notification_service.dart';
+
+/// Registered via FirebaseMessaging.onBackgroundMessage in main.dart --
+/// FCM requires this to be a top-level (or static) function, not a class
+/// method, since it can run in a freshly-spawned isolate with NO existing
+/// app state at all if the app was fully swiped away (same constraint
+/// notification_service.dart's own @pragma('vm:entry-point') callbacks
+/// already follow). Handles the data-only "overdue_alarm" push from
+/// jobs/overdueAlarmPush.js (server/) -- everything else (the normal
+/// task:created/task:updated `notification`-bearing pushes) is left alone
+/// here since the OS already displays those with zero app code needed.
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  if (message.data['type'] != 'overdue_alarm') return;
+  // A fresh isolate has no FirebaseApp yet -- every Firebase call below
+  // (including NotificationService's own, if it touches anything
+  // Firebase-adjacent) would throw "no Firebase App has been created"
+  // without this, exactly like background_watcher_service.dart's
+  // callbacks re-initialize their own dependencies for the same reason.
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  } catch (_) {
+    // Already initialized (app was alive, not a fresh isolate) -- fine.
+  }
+  await _ringOverdueAlarmFromPushData(message.data);
+}
+
+/// Shared by the background handler above AND PushService._showForeground
+/// below -- same data, same resulting alarm, whether the push arrived
+/// while the app was closed, backgrounded, or open.
+Future<void> _ringOverdueAlarmFromPushData(Map<String, dynamic> data) async {
+  final taskId = data['taskId'] as String?;
+  if (taskId == null || taskId.isEmpty) return;
+  try {
+    // init() is idempotent/cheap if already called (same pattern
+    // background_watcher_service.dart's entry points rely on) -- this
+    // isolate may never have run NotificationService.init() before.
+    await NotificationService.instance.init();
+    await NotificationService.instance.showOverdueAlarmNow(
+      taskId: taskId,
+      taskName: (data['taskName'] as String?) ?? 'Task',
+      spaceName: (data['spaceName'] as String?) ?? '',
+    );
+  } catch (e) {
+    debugPrint('[PushService] failed to ring overdue alarm from push: $e');
+  }
+}
 
 /// Remote push (FCM) -- the one path that can alert someone about a task
 /// change while the app is fully closed, which nothing else in this app
@@ -105,6 +153,17 @@ class PushService {
   }
 
   void _showForeground(RemoteMessage message) {
+    // Data-only overdue-alarm push (see firebaseMessagingBackgroundHandler
+    // above) -- has no `notification` key at all, so it would otherwise
+    // fall straight through the `notification == null` check below and
+    // show nothing while the app happens to be open. Handled on BOTH
+    // platforms here (unlike the plain-notification path below, which is
+    // iOS-skipped since the OS auto-presents those) since neither OS
+    // auto-presents anything for a data-only message.
+    if (message.data['type'] == 'overdue_alarm') {
+      unawaited(_ringOverdueAlarmFromPushData(message.data));
+      return;
+    }
     final notification = message.notification;
     if (notification == null) return;
     // iOS-only: init() above now calls setForegroundNotificationPresentation-
