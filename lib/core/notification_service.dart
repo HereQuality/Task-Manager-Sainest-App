@@ -992,7 +992,30 @@ class NotificationService {
   // surface an error the person can't act on from this screen. Skips the
   // Settings screen's synthetic "test_alarm" id (see _sendTestAlarm),
   // which was never a real task and would just 404.
-  Future<void> _syncReminderToServer(String taskId, DateTime? reminderAt) async {
+  // Chains every _syncReminderToServer call onto this instead of letting
+  // them fire truly concurrently -- confirmed live (server log, 2026-10)
+  // that dismissing/snoozing a BACKLOG of several stacked overdue alarms
+  // in quick succession (e.g. after the device was offline/closed for a
+  // while and catches up on many at once) fired that many PUT requests
+  // at essentially the same instant, and their response times climbed
+  // with each one (1.7s -> 7.6s) as they piled up server-side instead of
+  // being handled one at a time. Each call is still "fire and forget"
+  // from its own caller's perspective (end()/snoozeOverdueAlarm() never
+  // await this), but now at most one is ever actually in flight, so a
+  // burst becomes a short queue instead of a thundering herd.
+  Future<void> _reminderSyncChain = Future.value();
+
+  Future<void> _syncReminderToServer(String taskId, DateTime? reminderAt) {
+    final next = _reminderSyncChain.then((_) => _syncReminderToServerNow(taskId, reminderAt));
+    // Swallow here too (not just inside _syncReminderToServerNow's own
+    // try/catch) so one failed sync can't break the chain for every sync
+    // queued after it -- the chain variable itself must never become a
+    // Future that completes with an error.
+    _reminderSyncChain = next.catchError((_) {});
+    return next;
+  }
+
+  Future<void> _syncReminderToServerNow(String taskId, DateTime? reminderAt) async {
     if (!_objectIdRe.hasMatch(taskId)) return;
     try {
       await ApiClient.instance.dio.put(
