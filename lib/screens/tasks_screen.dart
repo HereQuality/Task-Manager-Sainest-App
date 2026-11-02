@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../core/task_delay.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
@@ -70,11 +71,15 @@ bool _isOverdue(Map<String, dynamic> t) {
   if (due == null) return false;
   final d = DateTime.tryParse(due.toString());
   if (d == null) return false;
-  return d.isBefore(DateTime.now());
+  // effectiveDueDeadline (not the raw dueDate) -- a bare, time-of-day-less
+  // due date goes overdue at the END of that day, same padding the web
+  // app and server both already apply, so this can't disagree with them
+  // by up to a full day for the same task.
+  return effectiveDueDeadline(d).isBefore(DateTime.now());
 }
 
 // Mirrors TaskListView.jsx#isTaskDelayed: a COMPLETE task that finished
-// strictly after its own due date.
+// strictly after its own (effective) due date.
 bool _isDelayed(Map<String, dynamic> t) {
   if (t['status'] != 'COMPLETE') return false;
   final due = t['dueDate'];
@@ -83,7 +88,7 @@ bool _isDelayed(Map<String, dynamic> t) {
   final d = DateTime.tryParse(due.toString());
   final c = DateTime.tryParse(completed.toString());
   if (d == null || c == null) return false;
-  return c.isAfter(d);
+  return c.isAfter(effectiveDueDeadline(d));
 }
 
 // Set (see the screen's build method, where tasks from

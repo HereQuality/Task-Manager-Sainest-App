@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -23,8 +24,24 @@ final pendingHomeTabIndex = ValueNotifier<int?>(null);
 
 /// Every task assigned to the logged-in user, across every Space --
 /// GET /api/v1/tasks/mine/all (same endpoint the web Calendar page uses).
+///
+/// Kept alive for a short window after its last listener unsubscribes,
+/// rather than the plain autoDispose default of tearing down (and losing
+/// the cached result) the instant the Tasks screen or Notifications
+/// screen (notificationsFeedProvider watches this too) is navigated away
+/// from. Without this, switching between those two screens in quick
+/// succession fired two independent fetches of the same endpoint instead
+/// of sharing one -- same short-TTL-cache intent as
+/// notification_schedule.dart/spaces_provider.dart already apply to
+/// their own endpoints, just expressed via Riverpod's own keepAlive
+/// rather than a hand-rolled static cache, since this provider (unlike
+/// those two) is already Riverpod-managed.
 final myTasksProvider =
     FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
+  final link = ref.keepAlive();
+  final timer = Timer(const Duration(seconds: 30), link.close);
+  ref.onDispose(timer.cancel);
+
   try {
     final res = await ApiClient.instance.dio.get('/tasks/mine/all');
     final data = res.data['data'] ?? res.data['tasks'] ?? [];

@@ -175,18 +175,75 @@ Future<void> armWatchdog() async {
 // actually signed in, and if so, make sure the watcher is running.
 // startBackgroundWatcher()'s own isRunning() check keeps this a no-op
 // the vast majority of the time, when the service never needed reviving.
+// Stamped at the very start of every tick callback (_onServiceStart's
+// first tick and every _tickAlarmCallback after it), before anything that
+// could throw -- the one signal _watchdogTick below can trust to answer
+// "is the self-chaining oneShot loop actually still alive," as opposed to
+// isRunning() (startBackgroundWatcher's own check), which only reflects
+// whether the foreground SERVICE PROCESS is alive. A process can stay
+// alive (isRunning() == true, persistent notification still showing) even
+// after its internal tick chain has silently died -- e.g. if
+// NotificationService.instance.init() throws inside a freshly-spawned
+// AlarmManager-callback isolate before _scheduleNextTick() ever gets a
+// chance to re-arm the next oneShot. Without this, that failure mode had
+// no recovery path at all, bounded or not: the 2-hour watchdog kept
+// finding isRunning() == true and doing nothing.
+const _lastTickAtKey = 'watcher_last_tick_at_ms';
+// Generous relative to the 1-minute cadence -- covers ordinary OEM/OS
+// scheduling jitter without false-triggering a revival on ticks that are
+// merely running a little late, not actually dead.
+const _tickStaleThreshold = Duration(minutes: 10);
+
+Future<void> _stampTickAlive() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_lastTickAtKey, DateTime.now().millisecondsSinceEpoch);
+  } catch (_) {
+    // Best-effort -- a failure here shouldn't block the actual tick work.
+  }
+}
+
 @pragma('vm:entry-point')
 void _watchdogTick() async {
   DartPluginRegistrant.ensureInitialized();
   final token = await ApiClient.instance.readToken();
   if (token == null) return;
   await startBackgroundWatcher();
+
+  // Belt-and-suspenders revival: even if the foreground service process
+  // itself is still alive (isRunning() == true, so startBackgroundWatcher
+  // above was a no-op), the self-chaining oneShot loop inside it may have
+  // silently died. Re-arming _scheduleNextTick() here is safe either way
+  // -- AndroidAlarmManager.oneShot under the SAME _tickAlarmId just
+  // replaces whatever's currently scheduled under that id rather than
+  // stacking a duplicate, so this can't double the polling cadence.
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final lastTickAt = prefs.getInt(_lastTickAtKey);
+    final isStale = lastTickAt == null ||
+        DateTime.now().millisecondsSinceEpoch - lastTickAt > _tickStaleThreshold.inMilliseconds;
+    if (isStale) {
+      print('[WATCHER] watchdog: tick chain looks dead (last tick: $lastTickAt) -- re-arming');
+      await _scheduleNextTick();
+    }
+  } catch (e) {
+    print('[WATCHER] watchdog staleness check failed: $e');
+  }
 }
 
 @pragma('vm:entry-point')
 void _onServiceStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
-  await NotificationService.instance.init();
+  await _stampTickAlive();
+  try {
+    await NotificationService.instance.init();
+  } catch (e) {
+    // Swallowed deliberately -- see _tickAlarmCallback's matching catch
+    // below for why this must not stop _runTick/_scheduleNextTick from
+    // still running.
+    print('[WATCHER] NotificationService.init failed in _onServiceStart: $e');
+  }
 
   if (service is AndroidServiceInstance) {
     service.on('stopService').listen((event) => service.stopSelf());
@@ -239,7 +296,23 @@ Future<void> _scheduleNextTick() => AndroidAlarmManager.oneShot(
 @pragma('vm:entry-point')
 void _tickAlarmCallback() async {
   DartPluginRegistrant.ensureInitialized();
-  await NotificationService.instance.init();
+  await _stampTickAlive();
+  try {
+    await NotificationService.instance.init();
+  } catch (e) {
+    // Deliberately swallowed, not rethrown -- previously this call sat
+    // outside any try/catch, so a single throw here (a platform-channel
+    // hiccup in this freshly-spawned isolate, confirmed as a real,
+    // non-hypothetical failure mode for this exact init pattern elsewhere
+    // in this file) permanently killed the self-chaining loop: neither
+    // _runTick nor the _scheduleNextTick() that re-arms the NEXT oneShot
+    // ever ran again, with nothing short of reopening the app able to
+    // notice or recover. Logging it is enough; the alarm/reminder checks
+    // inside _runTick are each already independently best-effort and
+    // don't require this init to have succeeded to still attempt their
+    // own work.
+    print('[WATCHER] NotificationService.init failed in _tickAlarmCallback: $e');
+  }
   await _runTick();
   await _scheduleNextTick();
 }
@@ -482,11 +555,20 @@ Future<void> _checkExtraRemindersOnce(List<Map<String, dynamic>> tasks, Notifica
     final status = (t['status'] ?? '').toString().toLowerCase();
     if (status.contains('complete') || status.contains('done')) continue;
 
-    // Same Urgent+assignee-only gate as the due-date alarm above -- extra
-    // reminders can only be added to a task once it's Urgent in the first
-    // place (see TaskDetailModal.jsx/edit_task_sheet.dart), so this just
-    // mirrors that at the ringing end too.
-    if ((t['priority'] ?? '').toString() != 'Urgent') continue;
+    // Assignee-only, same as the due-date alarm above -- but NOT
+    // Urgent-only here (unlike that alarm): extraReminders can only be
+    // ADDED to a task while it's Urgent, but nothing clears them if the
+    // task is later downgraded, so a non-Urgent task can still be
+    // carrying them. Those get the quiet plain-notification catch-up
+    // below instead of the loud full-screen alarm (reserved for Urgent),
+    // matching notifications_provider.dart's own foreground pass, which
+    // schedules extraReminders for ANY priority via a plain OS
+    // zonedSchedule -- previously that upfront schedule had no backstop
+    // at all if it silently failed to fire (the exact OEM-battery-killer
+    // failure mode the rest of this watcher architecture exists to work
+    // around for the Urgent alarm), so a non-Urgent reminder could simply
+    // never arrive with nothing here to catch it.
+    final isUrgent = (t['priority'] ?? '').toString() == 'Urgent';
     final assigneeIdRaw = t['assigneeId'];
     final taskAssigneeId = (assigneeIdRaw is Map ? assigneeIdRaw['_id'] : assigneeIdRaw)?.toString();
     if (taskAssigneeId == null || taskAssigneeId != currentUserId) continue;
@@ -519,8 +601,17 @@ Future<void> _checkExtraRemindersOnce(List<Map<String, dynamic>> tasks, Notifica
 
       if (!alertedInstantKeys.contains(instantKey)) {
         firedCount++;
-        print('[WATCHER] firing extra-reminder alarm for taskId=$id "$title" reminderAt=$when (now=$now)');
-        await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
+        if (isUrgent) {
+          print('[WATCHER] firing extra-reminder alarm for taskId=$id "$title" reminderAt=$when (now=$now)');
+          await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
+        } else {
+          print('[WATCHER] firing extra-reminder (non-Urgent, quiet) for taskId=$id "$title" reminderAt=$when (now=$now)');
+          await NotificationService.instance.showNow(
+            id: '${id}_extra_${when.millisecondsSinceEpoch}'.hashCode & 0x7fffffff,
+            title: 'Reminder: $title',
+            body: spaceName.isNotEmpty ? spaceName : title,
+          );
+        }
       }
     }
   }
