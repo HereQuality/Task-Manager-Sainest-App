@@ -54,9 +54,18 @@ const _statusOrder = [
 ];
 
 // Mirrors TaskListView.jsx#isTaskOverdue: a not-yet-complete task whose
-// due date has passed.
+// due date has passed. A task pending the delegator's approval is
+// already done from the assignee's side, just waiting on a decision --
+// not actually overdue, same exclusion the web/server already apply
+// everywhere (computeTaskScores et al.). Checked directly off the raw
+// `completionApproval` field rather than the `_pendingMyApproval` merge
+// flag below, since that flag is only set in the delegator's own merged
+// pending-approvals view, not on every task object this is called with
+// (e.g. the assignee's own copy of the same task).
 bool _isOverdue(Map<String, dynamic> t) {
   if (t['status'] == 'COMPLETE') return false;
+  final approval = t['completionApproval'];
+  if (approval is Map && approval['status'] == 'PENDING') return false;
   final due = t['dueDate'];
   if (due == null) return false;
   final d = DateTime.tryParse(due.toString());

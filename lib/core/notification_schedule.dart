@@ -193,11 +193,19 @@ class NotificationSchedule {
     if (isWithinWindow(candidate)) return candidate;
     var day = _BusinessDay.of(candidate);
     var minute = _minuteOfDay(candidate);
+    // The candidate's own time-of-day -- kept separately from `minute`
+    // (which gets overwritten as the loop advances) so a day-blocked
+    // deferral falls back to preserving the ORIGINAL requested time
+    // rather than always landing on minute 0 (midnight). Without this,
+    // deferring past a holiday/weekly-off day with office hours disabled
+    // collapsed every reminder due that day to exactly 12:00 AM on the
+    // next allowed day, stacking unrelated tasks' reminders together.
+    final originalMinute = minute;
     for (var i = 0; i < 60; i++) {
       final blocked = holidays.contains(day) || weeklyOffDays.contains(day.weekday);
       if (blocked) {
         day = day.addDays(1);
-        minute = officeHoursEnabled ? officeStartMinutes : 0;
+        minute = officeHoursEnabled ? officeStartMinutes : originalMinute;
         continue;
       }
       if (officeHoursEnabled) {

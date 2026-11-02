@@ -437,16 +437,22 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
           // matters -- deferred to the next allowed moment if the raw
           // due-minus-N-hours instant itself would land outside the
           // notification window (a holiday, a weekly off day, or outside
-          // office hours).
-          final remindAt = schedule.resolveNextAllowedInstant(
-            due.subtract(Duration(hours: settings.reminderHoursBefore)),
-          );
-          await NotificationService.instance.scheduleAt(
-            id: id.hashCode & 0x7fffffff,
-            title: 'Task due soon',
-            body: spaceName.isNotEmpty ? '$title · $spaceName' : title,
-            when: remindAt,
-          );
+          // office hours). Assignee-only, same as the extraReminders loop
+          // and the full-screen alarm below -- `tasks` includes a
+          // manager/senior's subordinates' tasks too (for the in-app feed
+          // item above, which IS meant to show those), but the actual OS
+          // push belongs only on the person it's assigned to.
+          if (isMine) {
+            final remindAt = schedule.resolveNextAllowedInstant(
+              due.subtract(Duration(hours: settings.reminderHoursBefore)),
+            );
+            await NotificationService.instance.scheduleAt(
+              id: id.hashCode & 0x7fffffff,
+              title: 'Task due soon',
+              body: spaceName.isNotEmpty ? '$title · $spaceName' : title,
+              when: remindAt,
+            );
+          }
         }
       }
 
@@ -455,24 +461,41 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // comment). Assignee-only (same as the alarm below), but NOT
       // Urgent-only: any task can carry these, they just post a normal
       // "Reminder: <task>" notification at each moment, no ring/snooze/
-      // end. Each is scheduled with a stable id derived from this task's
-      // id AND its own timestamp, so re-running this loop (every feed
-      // refresh) re-registers the exact same OS alarm instead of stacking
-      // a duplicate, and several reminders on one task never collide with
-      // each other's id.
+      // end. Each slot is scheduled under a stable id derived from this
+      // task's id AND its position in the array (NOT its timestamp) --
+      // re-running this loop (every feed refresh) re-registers the exact
+      // same OS alarm under the same id instead of stacking a duplicate.
+      // Using the position rather than the timestamp is what lets a
+      // changed/removed reminder actually cancel its old OS notification
+      // below, instead of just silently abandoning it under an id that's
+      // never addressed again.
       if (isMine) {
         final rawExtra = t['extraReminders'];
-        if (rawExtra is List) {
-          for (final rawWhen in rawExtra) {
-            final when = DateTime.tryParse(rawWhen.toString());
-            if (when == null || when.isBefore(now)) continue;
-            await NotificationService.instance.scheduleAt(
-              id: '${id}_extra_${when.millisecondsSinceEpoch}'.hashCode & 0x7fffffff,
-              title: 'Reminder: $title',
-              body: spaceName.isNotEmpty ? spaceName : title,
-              when: when,
-            );
+        final extraList = rawExtra is List ? rawExtra : const [];
+        for (var i = 0; i < extraList.length; i++) {
+          final slotId = '${id}_extra_$i'.hashCode & 0x7fffffff;
+          final when = DateTime.tryParse(extraList[i].toString());
+          if (when == null || when.isBefore(now)) {
+            // No longer a future reminder (cleared, or already passed) --
+            // cancel whatever was previously scheduled under this slot so
+            // editing/removing a reminder actually stops the old alarm,
+            // rather than leaving it armed under an id nothing re-touches.
+            await NotificationService.instance.cancel(slotId);
+            continue;
           }
+          await NotificationService.instance.scheduleAt(
+            id: slotId,
+            title: 'Reminder: $title',
+            body: spaceName.isNotEmpty ? spaceName : title,
+            when: when,
+          );
+        }
+        // Slots beyond the current (possibly shrunk) list length may still
+        // hold a stale OS alarm from a previous, longer extraReminders
+        // array -- cancel a bounded range past the current length so a
+        // removed trailing reminder doesn't keep ringing either.
+        for (var i = extraList.length; i < extraList.length + 10; i++) {
+          await NotificationService.instance.cancel('${id}_extra_$i'.hashCode & 0x7fffffff);
         }
       }
 

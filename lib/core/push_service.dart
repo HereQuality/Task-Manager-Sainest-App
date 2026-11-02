@@ -26,8 +26,14 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // callbacks re-initialize their own dependencies for the same reason.
   try {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  } catch (_) {
-    // Already initialized (app was alive, not a fresh isolate) -- fine.
+  } catch (e) {
+    // Expected when the app was already alive (not a fresh isolate) --
+    // but also where a GENUINE init failure would land, silently and
+    // indistinguishably, with nothing below depending on it today. Logged
+    // (not swallowed outright) so a real failure is at least visible if
+    // this handler ever grows a dependency on a live FirebaseApp.
+    // ignore: avoid_print
+    print('[push_service] Firebase.initializeApp in background handler: $e');
   }
   await _ringOverdueAlarmFromPushData(message.data);
 }
