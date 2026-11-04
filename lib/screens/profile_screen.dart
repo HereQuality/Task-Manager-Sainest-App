@@ -4,10 +4,46 @@ import 'package:go_router/go_router.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 
-class ProfileScreen extends ConsumerWidget {
+class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
 
+  @override
+  ConsumerState<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends ConsumerState<ProfileScreen> {
+  // Guards against a second tap firing a second, concurrent logout() call.
+  // Without this (and the spinner it also gates below), the Log out
+  // button gave no feedback at all while logout() ran -- on iOS in
+  // particular, PushService.unregisterCurrentToken() inside logout() can
+  // take several seconds (it waits on the device's APNs token), so the
+  // button looked dead and people tapped it again, sometimes 2-3 times,
+  // each tap starting its own overlapping logout() call.
+  bool _loggingOut = false;
+
   Future<void> _confirmLogout(BuildContext context, WidgetRef ref) async {
+    if (_loggingOut) return;
+    // Captured synchronously, right here, before any await -- the
+    // AuthNotifier itself lives in the app-wide ProviderScope, not tied
+    // to this screen's lifecycle, so it stays perfectly valid to call
+    // even if ProfileScreen gets unmounted later (a concurrent session
+    // expiry, or any navigation away while the dialog below was still
+    // open). Calling ref.read(...) again AFTER an await, gated on
+    // `mounted`, would instead skip logout() entirely whenever that
+    // happened -- someone who explicitly confirmed "Log out" would end up
+    // still logged in with no error shown.
+    final authNotifier = ref.read(authProvider.notifier);
+    // Set BEFORE showDialog, not after it resolves -- showDialog's modal
+    // barrier blocks a second tap once its route has actually been pushed,
+    // but two taps landing in the same frame (a fast double-tap, or a
+    // device occasionally delivering a duplicate pointer event) can both
+    // pass the `if (_loggingOut) return;` guard above and each call
+    // showDialog before either route exists yet, opening two overlapping
+    // confirmation dialogs -- and, if both get confirmed, the exact
+    // concurrent-logout() race this flag exists to prevent. Reset below
+    // if the person cancels, since only an actual logout() call should
+    // keep the button disabled.
+    setState(() => _loggingOut = true);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -23,13 +59,34 @@ class ProfileScreen extends ConsumerWidget {
         ],
       ),
     );
-    if (confirmed == true) {
-      await ref.read(authProvider.notifier).logout();
+    if (confirmed != true) {
+      if (mounted) setState(() => _loggingOut = false);
+      return;
+    }
+    try {
+      await authNotifier.logout();
+    } catch (_) {
+      // logout() itself isn't documented to throw, but it awaits
+      // several platform-channel/secure-storage calls (clearToken,
+      // clearRememberMe) that CAN -- see api_client.dart's own
+      // doc comment on flutter_secure_storage's KeyStore failures on
+      // some Android devices. Without this catch, that exception would
+      // propagate straight out of this async callback uncaught and the
+      // `finally` below would be the only thing left to reset
+      // _loggingOut, which is the actual fix -- this catch just stops
+      // the exception from surfacing as an unhandled error too.
+    } finally {
+      // No need to reset _loggingOut on success -- a successful logout
+      // tears this whole screen down via the router's redirect to /login,
+      // so by the time this runs `mounted` is already false and this is
+      // a no-op. Only matters on the (rare) chance logout() throws, so
+      // the button doesn't stay stuck disabled forever.
+      if (mounted) setState(() => _loggingOut = false);
     }
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final user = ref.watch(authProvider).user;
     final initial = (user != null && user.name.isNotEmpty) ? user.name[0].toUpperCase() : '?';
 
@@ -102,9 +159,18 @@ class ProfileScreen extends ConsumerWidget {
           ),
           const SizedBox(height: Gap.xl),
           OutlinedButton.icon(
-            onPressed: () => _confirmLogout(context, ref),
-            icon: const Icon(Icons.logout_rounded, color: AppColors.danger, size: 18),
-            label: const Text('Log out', style: TextStyle(color: AppColors.danger, fontWeight: FontWeight.w700)),
+            onPressed: _loggingOut ? null : () => _confirmLogout(context, ref),
+            icon: _loggingOut
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.danger),
+                  )
+                : const Icon(Icons.logout_rounded, color: AppColors.danger, size: 18),
+            label: Text(
+              _loggingOut ? 'Logging out…' : 'Log out',
+              style: const TextStyle(color: AppColors.danger, fontWeight: FontWeight.w700),
+            ),
             style: OutlinedButton.styleFrom(
               minimumSize: const Size.fromHeight(48),
               side: const BorderSide(color: AppColors.line),

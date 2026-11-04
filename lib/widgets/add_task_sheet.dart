@@ -1,8 +1,10 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import '../core/offline_task_queue.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
@@ -112,7 +114,12 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
   // so a partial batch is never silently reported as fully successful.
   var created = 0;
   var failed = 0;
+  var queued = 0;
   for (final target in targets) {
+    // Declared outside the try so the catch block below can tell whether
+    // createTaskInSpace already succeeded before assignTaskAndMoveSpace
+    // then failed -- see the catch's own doc comment.
+    String? createdTaskId;
     try {
       final taskId = await createTaskInSpace(
         result.spaceId,
@@ -124,6 +131,7 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
         priority: result.priority,
         projectId: result.projectId,
       );
+      createdTaskId = taskId;
       // Two-step on purpose when an assignee was picked -- see
       // assignTaskAndMoveSpace's own doc comment: this is what actually
       // gets the task into that person's real team even when they're on a
@@ -136,6 +144,33 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
         await assignTaskAndMoveSpace(taskId, target.assigneeId!, targetSpaceId: target.spaceId);
       }
       created += 1;
+    } on DioException catch (e) {
+      // No internet / request couldn't reach the server at all, as
+      // opposed to the server rejecting it (bad data, expired session) --
+      // only THIS kind is worth queuing, since a real rejection would
+      // just fail the exact same way on retry. See offline_task_queue.dart.
+      if (isConnectivityError(e)) {
+        await OfflineTaskQueue.instance.enqueue(
+          spaceId: result.spaceId,
+          name: result.name,
+          startDate: result.startDate,
+          dueDate: result.dueDate,
+          reminderAt: result.reminderAt,
+          extraReminders: result.extraReminders,
+          priority: result.priority,
+          projectId: result.projectId,
+          assigneeId: target.assigneeId,
+          targetSpaceId: target.spaceId,
+          // Passed through if createTaskInSpace already succeeded above
+          // and it was the LATER assignTaskAndMoveSpace call that hit
+          // this connectivity error -- see enqueue()'s own doc comment
+          // for why skipping a re-create on retry matters here.
+          createdTaskId: createdTaskId,
+        );
+        queued += 1;
+      } else {
+        failed += 1;
+      }
     } catch (_) {
       failed += 1;
     }
@@ -151,11 +186,21 @@ Future<void> showAddTaskSheet(BuildContext context, WidgetRef ref) async {
   // otherwise, unlike Android's background_watcher_service.dart).
   unawaited(ref.read(notificationsFeedProvider.future));
   if (context.mounted) {
-    final message = targets.length <= 1
-        ? (created > 0 ? 'Task added' : 'Failed to add task')
-        : failed > 0
-            ? '$created task${created == 1 ? '' : 's'} added, $failed failed'
-            : '$created tasks added';
+    final String message;
+    if (targets.length <= 1) {
+      message = created > 0
+          ? 'Task added'
+          : queued > 0
+              ? "No internet — task will be added automatically once you're back online"
+              : 'Failed to add task';
+    } else {
+      final parts = <String>[
+        if (created > 0) '$created added',
+        if (queued > 0) '$queued queued (offline)',
+        if (failed > 0) '$failed failed',
+      ];
+      message = parts.isEmpty ? 'Failed to add task' : parts.join(', ');
+    }
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 }
@@ -432,6 +477,32 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
       );
       return;
     }
+
+    // createTaskInSpace (POST /tasks/space/:spaceId) requires THIS account
+    // to actually be a member of that space -- the server's own
+    // assertSpaceAccess rejects it with 403 otherwise. _spaceId can be the
+    // CHOSEN ASSIGNEE's space instead (see _onAssigneesChanged's single-
+    // assignee auto-fill, and the Space dropdown's own items list, which
+    // merges that foreign space in purely so it previews correctly) -- a
+    // non-Full-Access person assigning someone on a different team is
+    // simply never a member of that team's space themselves. Submitting
+    // _spaceId AS-IS in that case 403'd on the very first network call,
+    // before assignment was even attempted: confirmed live in production
+    // server logs (POST /tasks/space/:id 403 "You do not have access to
+    // this space", immediately after the per-employee Space lookup for a
+    // single cross-team assignee pick).
+    //
+    // The fix: create the task in a space THIS account is actually a
+    // member of, and let showAddTaskSheet's own existing per-target
+    // fetchAllEmployeeSpaces + assignTaskAndMoveSpace(targetSpaceId: ...)
+    // relocate it to the chosen assignee's real team afterward -- exactly
+    // the same mechanism the multi-assignee path already relies on, which
+    // never had this bug because it never touches _spaceId for display.
+    final memberSpaces = ref.read(spacesProvider).valueOrNull ?? const <Map<String, dynamic>>[];
+    final isMemberSpace = memberSpaces.any((s) => s['_id']?.toString() == _spaceId);
+    final createSpaceId = isMemberSpace
+        ? _spaceId!
+        : (memberSpaces.isNotEmpty ? memberSpaces.first['_id']?.toString() ?? _spaceId! : _spaceId!);
     if (_priority == 'Urgent' && (_reminderDate == null || _reminderTime == null)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Urgent tasks need a reminder date and time for the alarm.')),
@@ -463,7 +534,7 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
       context,
       _AddTaskResult(
         name: name,
-        spaceId: _spaceId!,
+        spaceId: createSpaceId,
         startDate: _startDate,
         dueDate: dueDateTime,
         reminderAt: reminderDateTime,
@@ -518,7 +589,16 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),
               ),
-              error: (e, _) => Text('Could not load employees.', style: Theme.of(context).textTheme.bodyMedium),
+              error: (e, _) => _RetryableLoadError(
+                message: 'Could not load employees.',
+                // assignableEmployeesProvider is deliberately NOT
+                // .autoDispose (see its own doc comment) so repeat opens
+                // of this sheet don't re-fetch it every time -- but that
+                // also means a failed fetch's AsyncError stays cached for
+                // the rest of the session with nothing to retry it short
+                // of logging out, unless this button does it explicitly.
+                onRetry: () => ref.invalidate(assignableEmployeesProvider),
+              ),
             ),
             // "Who's actually getting which Team" preview -- shows up the
             // instant each person is ticked (see _onAssigneesChanged), so
@@ -775,7 +855,13 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),
               ),
-              error: (e, _) => Text('Could not load spaces.', style: Theme.of(context).textTheme.bodyMedium),
+              error: (e, _) => _RetryableLoadError(
+                message: 'Could not load spaces.',
+                // Same reasoning as assignableEmployeesProvider's retry
+                // button above -- spacesProvider is also deliberately not
+                // .autoDispose.
+                onRetry: () => ref.invalidate(spacesProvider),
+              ),
             ),
             const SizedBox(height: Gap.xl),
 
@@ -817,6 +903,34 @@ class _DatePickerField extends StatelessWidget {
           value ?? 'Not set',
           style: TextStyle(color: value == null ? AppColors.inkMuted : AppColors.ink),
         ),
+      ),
+    );
+  }
+}
+
+/// An AsyncValue.error state with a Retry button -- specifically for
+/// spacesProvider/assignableEmployeesProvider, which are deliberately NOT
+/// .autoDispose (see their own doc comments in spaces_provider.dart/
+/// employees_provider.dart). A plain error Text was enough when these
+/// were autoDispose, since leaving and reopening this sheet re-fetched
+/// automatically; kept alive for the whole session, a failed fetch's
+/// cached AsyncError would otherwise sit there unrecoverable until the
+/// person logs out and back in, even once their connection comes back.
+class _RetryableLoadError extends StatelessWidget {
+  const _RetryableLoadError({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Gap.xs),
+      child: Row(
+        children: [
+          Expanded(child: Text(message, style: Theme.of(context).textTheme.bodyMedium)),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
       ),
     );
   }

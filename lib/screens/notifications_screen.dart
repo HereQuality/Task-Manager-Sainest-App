@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -22,6 +25,8 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
         return Icons.schedule_rounded;
       case NotificationKind.ticketUpdate:
         return Icons.confirmation_number_outlined;
+      case NotificationKind.taskAssigned:
+        return Icons.assignment_outlined;
     }
   }
 
@@ -33,7 +38,28 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
         return AppColors.warning;
       case NotificationKind.ticketUpdate:
         return AppColors.indigo;
+      case NotificationKind.taskAssigned:
+        return AppColors.success;
     }
+  }
+
+  String _messageFor(Object e) {
+    if (e is SocketException) return "No internet connection. Check your network and try again.";
+    if (e is DioException) {
+      switch (e.type) {
+        case DioExceptionType.connectionTimeout:
+        case DioExceptionType.sendTimeout:
+        case DioExceptionType.receiveTimeout:
+          return "This is taking too long -- your connection may be slow. Try again.";
+        case DioExceptionType.connectionError:
+          return "No internet connection. Check your network and try again.";
+        case DioExceptionType.badResponse:
+          return "The server had a problem loading this. Try again in a moment.";
+        default:
+          break;
+      }
+    }
+    return 'Something went wrong loading notifications.';
   }
 
   @override
@@ -143,9 +169,14 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
           // Was `message: '$e'` -- dumped the raw DioException (status code,
           // MDN link, "verify and fix your request code" boilerplate and
           // all) straight onto the screen. Matches the friendly-message
-          // pattern every other screen's ErrorState already uses.
+          // pattern every other screen's ErrorState already uses. Still a
+          // single generic line per exception TYPE rather than the raw
+          // exception, but now distinguishes "no connection" / "took too
+          // long" / "server error" instead of showing the exact same
+          // message for all three -- those have different, actionable
+          // next steps for the person reading it.
           error: (e, _) => ErrorState(
-            message: 'Something went wrong loading notifications.',
+            message: _messageFor(e),
             onRetry: () => ref.invalidate(notificationsFeedProvider),
           ),
         ),

@@ -11,8 +11,10 @@ import 'core/app_update_service.dart';
 import 'core/notification_service.dart';
 import 'core/push_service.dart';
 import 'core/background_watcher_service.dart';
+import 'core/offline_task_queue.dart';
 import 'core/pending_attachment_service.dart';
 import 'core/socket_service.dart';
+import 'providers/tasks_provider.dart';
 import 'firebase_options.dart';
 import 'providers/auth_provider.dart';
 
@@ -61,6 +63,13 @@ Future<void> main() async {
   // is what was actually happening on the test device despite every
   // scheduling/permission fix tried before this.
   await initializeBackgroundWatcher();
+  // OfflineTaskQueue.instance.init() is deliberately NOT started here --
+  // see _HqeplAppState.initState() in this file, where it's called right
+  // after syncedNotifier/droppedNotifier get their listeners attached.
+  // Starting it this early (before those listeners exist) risked init()'s
+  // own startup flush() completing -- and bumping both notifiers -- before
+  // anything was listening for them, silently dropping the task-list
+  // refresh/dropped-task SnackBar for whatever it synced at launch.
   // Independent OS-level watchdog for that same service -- see
   // armWatchdog's own doc comment for why a resume-triggered check alone
   // (below, in _HqeplAppState) isn't enough on its own.
@@ -210,13 +219,70 @@ class _HqeplAppState extends ConsumerState<HqeplApp> with WidgetsBindingObserver
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Bridges offline_task_queue.dart's plain ValueNotifier (that service
+    // has no Riverpod ref of its own) into an actual provider refresh, so
+    // a task that synced while this screen wasn't watching myTasksProvider
+    // still shows up without the person having to pull-to-refresh.
+    OfflineTaskQueue.instance.syncedNotifier.addListener(_onOfflineTasksSynced);
+    // A queued task that's been permanently given up on (see flush()'s own
+    // doc comment) must never vanish silently -- the person explicitly
+    // added it, so they need to know it's gone and re-add it themselves.
+    OfflineTaskQueue.instance.droppedNotifier.addListener(_onOfflineTasksDropped);
+    // Separate from droppedNotifier above -- these DID get created on the
+    // server before failing, so telling the person to "re-add" one would
+    // create a genuine duplicate. See its own doc comment in
+    // offline_task_queue.dart.
+    OfflineTaskQueue.instance.droppedAfterCreateNotifier.addListener(_onOfflineTasksDroppedAfterCreate);
+    // Started here, now that both listeners above are already attached --
+    // see main()'s own doc comment for why starting this any earlier (it
+    // used to run there, unawaited, before this widget existed) risked
+    // its own startup flush() completing before anything could react to
+    // it.
+    unawaited(OfflineTaskQueue.instance.init());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    OfflineTaskQueue.instance.syncedNotifier.removeListener(_onOfflineTasksSynced);
+    OfflineTaskQueue.instance.droppedNotifier.removeListener(_onOfflineTasksDropped);
+    OfflineTaskQueue.instance.droppedAfterCreateNotifier.removeListener(_onOfflineTasksDroppedAfterCreate);
     super.dispose();
   }
+
+  void _onOfflineTasksSynced() {
+    ref.invalidate(myTasksProvider);
+    ref.invalidate(dashboardStatsProvider);
+  }
+
+  void _onOfflineTasksDropped() {
+    _scaffoldMessengerKey.currentState?.showSnackBar(
+      const SnackBar(
+        content: Text("Some offline tasks couldn't be added and were not saved — please re-add them"),
+        duration: Duration(seconds: 6),
+      ),
+    );
+  }
+
+  void _onOfflineTasksDroppedAfterCreate() {
+    // These DID make it to the server (just unassigned, or otherwise
+    // incomplete) -- invalidate so they actually show up in the task
+    // list, and point the person at it instead of telling them to re-add
+    // (which would create a real duplicate alongside the one that already
+    // exists).
+    ref.invalidate(myTasksProvider);
+    ref.invalidate(dashboardStatsProvider);
+    _scaffoldMessengerKey.currentState?.showSnackBar(
+      const SnackBar(
+        content: Text(
+          "Some offline tasks were created but couldn't be fully set up (e.g. assigned) — check your task list",
+        ),
+        duration: Duration(seconds: 6),
+      ),
+    );
+  }
+
+  final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -228,6 +294,11 @@ class _HqeplAppState extends ConsumerState<HqeplApp> with WidgetsBindingObserver
       // app was backgrounded and needs a fresh handshake now that a resume
       // proves there's network again.
       unawaited(SocketService.instance.connect());
+      // Same reasoning as the socket reconnect just above -- a resume is
+      // the clearest signal this device likely has network again after
+      // being backgrounded, so it's worth checking the offline queue even
+      // if the connectivity-change stream missed the actual transition.
+      unawaited(OfflineTaskQueue.instance.flush());
       // Finishes any task attachment whose picker was still open when the
       // app went to the background -- this is the ONLY place the upload is
       // actually kicked off, whether or not Android tore the Activity down
@@ -259,6 +330,7 @@ class _HqeplAppState extends ConsumerState<HqeplApp> with WidgetsBindingObserver
           next.status == AuthStatus.authenticated) {
         unawaited(PendingAttachmentService.instance.recoverPendingUpload());
         unawaited(SocketService.instance.connect());
+        unawaited(OfflineTaskQueue.instance.flush());
       } else if (previous?.status == AuthStatus.authenticated &&
           next.status != AuthStatus.authenticated) {
         // Logout (or a 401 clearing the session) -- see disconnect's own
@@ -272,6 +344,7 @@ class _HqeplAppState extends ConsumerState<HqeplApp> with WidgetsBindingObserver
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(),
       routerConfig: router,
+      scaffoldMessengerKey: _scaffoldMessengerKey,
       // en-GB (not the device's own system locale) so every Material
       // date picker's manual keyboard-entry field reads DD/MM/YYYY
       // everywhere in the app, matching the day-before-month order every

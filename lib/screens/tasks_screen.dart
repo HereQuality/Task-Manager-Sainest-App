@@ -5,6 +5,7 @@ import '../core/task_delay.dart';
 import '../core/theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/employees_provider.dart';
+import '../providers/spaces_provider.dart' show spacesProvider;
 import '../providers/tasks_provider.dart';
 import '../widgets/entity_card.dart';
 import '../widgets/empty_state.dart';
@@ -342,6 +343,11 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     // the filter sheet instead of only however many are already visible
     // in this account's own task list.
     final allEmployees = ref.watch(assignableEmployeesProvider).value ?? const <Map<String, dynamic>>[];
+    // Warms spacesProvider here too, so by the time the Add Task sheet
+    // opens from this screen it's already cached (see spacesProvider's
+    // doc comment -- it's no longer autoDispose, so this one watch is
+    // enough to keep it loaded for every subsequent sheet open).
+    ref.watch(spacesProvider);
     // Best-effort: pendingApprovalsProvider failing/still-loading shouldn't
     // block the whole screen the way tasksAsync's own error/loading state
     // does below -- worst case the DELEGATED group is just empty a moment

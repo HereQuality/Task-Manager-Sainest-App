@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import '../core/notification_service.dart';
 import '../core/theme.dart';
+import '../providers/notifications_provider.dart' show markOverdueAlarmHandled;
 
 /// The full-screen "ringing" view for a task reminder -- reached when the
 /// alarm notification's full-screen intent fires (device locked or
@@ -23,6 +24,17 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProv
   late final String _taskId;
   late final String _taskName;
   late final String _spaceName;
+  // 'overdue' (the task's own due-date/reminderAt alarm) or
+  // 'extraReminder' (one of its extraReminders instants, background_
+  // watcher_service.dart's _checkExtraRemindersOnce) -- this screen is
+  // reused as-is for both (see that function's own doc comment), but
+  // Snooze/End below must only touch _alertedOverdueIdsKey for the
+  // former: that key is this task's OWN "already alerted" record for its
+  // real overdue condition, entirely unrelated to which extra reminder
+  // instant happened to trigger this particular ring. Missing/unknown
+  // 'source' (an older payload persisted before this field existed)
+  // defaults to 'overdue', its only possible meaning before now.
+  late final String _source;
   bool _busy = false;
 
   late final AnimationController _pulseController;
@@ -36,6 +48,7 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProv
     _taskId = (data['taskId'] ?? '').toString();
     _taskName = (data['taskName'] ?? 'Task').toString();
     _spaceName = (data['spaceName'] ?? '').toString();
+    _source = (data['source'] as String?) ?? 'overdue';
     // Consumed -- clears the router's redirect trigger so leaving this
     // screen (Snooze/End) doesn't immediately bounce straight back into
     // it. Deferred to after this frame:
@@ -143,6 +156,7 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProv
         taskName: _taskName,
         spaceName: _spaceName,
         duration: duration,
+        source: _source,
       );
       if (mounted) context.go('/home');
     } catch (_) {
@@ -158,11 +172,20 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProv
   // complete. Just cancels whatever alarm is currently scheduled for it
   // (the one that just rang, or a snooze that hadn't fired yet); it
   // deliberately does NOT touch the task's status, so an overdue task
-  // stays overdue in the task list same as before. Since the task was
-  // already recorded in the "alerted" set the moment this alarm first
-  // fired (see background_watcher_service.dart/notifications_provider.dart's
-  // shared alertedIds tracking), it won't ring again on its own -- only a
-  // real change to the task's reminder time can bring the alarm back.
+  // stays overdue in the task list same as before. markOverdueAlarmHandled
+  // records this task as "already alerted" right now, rather than waiting
+  // for the next feed/watcher poll to do it (that poll might never run
+  // again before the person logs out -- see its own doc comment) -- only
+  // a real change to the task's reminder time can bring the alarm back.
+  //
+  // Only called when _source is 'overdue' -- an extraReminder-triggered
+  // ring already records its OWN "already alerted" instant key entirely
+  // on its own (background_watcher_service.dart's _checkExtraRemindersOnce
+  // persists it unconditionally the moment it fires, before End is even
+  // possible). Calling markOverdueAlarmHandled for that case too would
+  // wrongly mark this task's real, unrelated due-date alarm as already
+  // alerted, silently suppressing it the next time the task is genuinely
+  // overdue.
   Future<void> _end() async {
     if (_taskId.isEmpty || _busy) return;
     setState(() => _busy = true);
@@ -172,7 +195,8 @@ class _AlarmScreenState extends ConsumerState<AlarmScreen> with SingleTickerProv
       // catch here means a future change to it (or a platform-channel
       // surprise) can never again leave _busy stuck true with no way to
       // reset it, which reads as this whole screen having frozen.
-      await NotificationService.instance.cancelOverdueAlarm(_taskId);
+      if (_source == 'overdue') await markOverdueAlarmHandled(_taskId);
+      await NotificationService.instance.cancelOverdueAlarm(_taskId, source: _source);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Alarm dismissed')));
         context.go('/home');

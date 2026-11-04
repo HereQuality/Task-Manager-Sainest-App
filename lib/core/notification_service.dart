@@ -478,6 +478,7 @@ class NotificationService {
     required String taskName,
     required String spaceName,
     required DateTime when,
+    String source = 'overdue',
   }) async {
     if (!Platform.isIOS) return;
     try {
@@ -501,7 +502,7 @@ class NotificationService {
       await prefs.setString(_alarmKitIdPrefsKey(taskId), alarmId);
       await prefs.setString(
         _alarmKitTaskPrefsKey(alarmId),
-        _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
+        _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName, source: source),
       );
     } catch (_) {
       // iOS < 26, AlarmKit not authorized, or a platform hiccup -- the
@@ -760,8 +761,22 @@ class NotificationService {
   // _handleNotificationTap treats as 'alarm' too (that's ALL this payload
   // shape was ever used for before), so an in-flight alarm survives the
   // upgrade correctly instead of silently being misrouted.
-  String _alarmPayload({required String taskId, required String taskName, required String spaceName}) =>
-      jsonEncode({'type': 'alarm', 'taskId': taskId, 'taskName': taskName, 'spaceName': spaceName});
+  // 'source' distinguishes the task's own due-date/reminderAt alarm
+  // ('overdue', the default -- also what an older payload with no
+  // 'source' key at all means, same upgrade-safety reasoning as 'type'
+  // above) from one rung by background_watcher_service.dart's
+  // extraReminders catch-up ('extraReminder') -- alarm_screen.dart's End
+  // button reads this to decide which "already alerted" record to touch.
+  // See markOverdueAlarmHandled's own doc comment in
+  // notifications_provider.dart for why conflating the two silently
+  // broke the task's real overdue alarm.
+  String _alarmPayload({
+    required String taskId,
+    required String taskName,
+    required String spaceName,
+    String source = 'overdue',
+  }) =>
+      jsonEncode({'type': 'alarm', 'taskId': taskId, 'taskName': taskName, 'spaceName': spaceName, 'source': source});
 
   String _taskUpdatePayload({required String taskId}) =>
       jsonEncode({'type': 'task_update', 'taskId': taskId});
@@ -777,6 +792,7 @@ class NotificationService {
     required String taskId,
     required String taskName,
     required String spaceName,
+    String source = 'overdue',
   }) async {
     try {
       await _plugin.show(
@@ -784,7 +800,7 @@ class NotificationService {
         'Reminder: $taskName',
         spaceName.isNotEmpty ? 'Space: $spaceName · tap Snooze or End' : 'Tap Snooze or End',
         const NotificationDetails(android: _overdueChannel, iOS: DarwinNotificationDetails(interruptionLevel: InterruptionLevel.timeSensitive)),
-        payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
+        payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName, source: source),
       );
     } catch (_) {}
     // AlarmKit has no "fire immediately" call -- a few seconds out is the
@@ -794,6 +810,7 @@ class NotificationService {
       taskName: taskName,
       spaceName: spaceName,
       when: DateTime.now().add(const Duration(seconds: 2)),
+      source: source,
     );
   }
 
@@ -805,6 +822,7 @@ class NotificationService {
     required String taskName,
     required String spaceName,
     required DateTime when,
+    String source = 'overdue',
   }) async {
     final fireAt = _tzFrom(when);
     try {
@@ -830,7 +848,7 @@ class NotificationService {
             // icon in the status bar while pending.
             androidScheduleMode: AndroidScheduleMode.alarmClock,
             uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-            payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName),
+            payload: _alarmPayload(taskId: taskId, taskName: taskName, spaceName: spaceName, source: source),
           )
           .timeout(const Duration(seconds: 8));
       // Deliberately printed (not debugPrint-gated) so it survives in
@@ -918,7 +936,7 @@ class NotificationService {
   // never block the caller from proceeding to navigate away. Worst case a
   // stale scheduled notification lingers, which is harmless compared to
   // leaving the person stuck on this screen.
-  Future<void> cancelOverdueAlarm(String taskId) async {
+  Future<void> cancelOverdueAlarm(String taskId, {String source = 'overdue'}) async {
     try {
       await _plugin.cancel(_alarmId(taskId));
     } catch (_) {}
@@ -948,9 +966,16 @@ class NotificationService {
     // alarm should be an immediate, unconditional guarantee that THIS
     // device never rings it again, not something left to a race with
     // whichever poll happens to run next.
-    try {
-      await _markAlerted(taskId).timeout(const Duration(seconds: 3));
-    } catch (_) {}
+    // Only for the task's own real overdue alarm -- see alarm_screen.dart's
+    // _source doc comment. An extraReminder-sourced End already has its
+    // own instant self-recorded (background_watcher_service.dart's
+    // _checkExtraRemindersOnce); marking _alertedOverdueIdsKey here too
+    // would wrongly suppress this task's real, unrelated overdue alarm.
+    if (source == 'overdue') {
+      try {
+        await _markAlerted(taskId).timeout(const Duration(seconds: 3));
+      } catch (_) {}
+    }
     // A real (non-test/placeholder) task id -- also tell the server this
     // reminder is done, so it can never come back as a stale catch-up
     // fire on a DIFFERENT device/after a reinstall, where the local
@@ -970,7 +995,10 @@ class NotificationService {
     // reading as stuck/frozen. Its own 8s timeout plus internal try/catch
     // still guarantee it completes and never throws unhandled; it just no
     // longer has to finish before the person can leave this screen.
-    unawaited(_syncReminderToServer(taskId, null));
+    // Same source guard as above -- this task's real reminderAt must not
+    // be wiped on the server just because an unrelated extraReminder
+    // instant was dismissed.
+    if (source == 'overdue') unawaited(_syncReminderToServer(taskId, null));
   }
 
   Future<void> _markAlerted(String taskId) async {
@@ -1036,11 +1064,21 @@ class NotificationService {
   /// _snoozedUntilKey doc comment above. Split out from snoozeOverdueAlarm
   /// so it can be given its own timeout there without also timing out the
   /// actual alarm scheduling.
-  Future<void> _markSnoozed(String taskId, DateTime until) async {
+  Future<void> _markSnoozed(String taskId, DateTime until, String source) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
-    final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet()..remove(taskId);
-    await prefs.setStringList(_alertedOverdueIdsKey, alertedIds.toList());
+    // Only clear this task's REAL overdue/due-date alert record when
+    // that's actually what's being snoozed -- source == 'extraReminder'
+    // means this ring came from one of the task's separate extraReminders
+    // instants (see alarm_screen.dart's own doc comment), which has
+    // nothing to do with _alertedOverdueIdsKey at all; removing taskId
+    // from it here would wrongly un-mark a genuinely separate overdue
+    // alert this task may already have, making it re-ring even though
+    // nobody snoozed THAT one.
+    if (source == 'overdue') {
+      final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet()..remove(taskId);
+      await prefs.setStringList(_alertedOverdueIdsKey, alertedIds.toList());
+    }
 
     final rawMap = prefs.getString(_snoozedUntilKey);
     Map<String, dynamic> snoozedUntil = {};
@@ -1063,6 +1101,7 @@ class NotificationService {
     required String taskName,
     required String spaceName,
     Duration duration = const Duration(minutes: 5),
+    String source = 'overdue',
   }) async {
     // Deferred to the next allowed instant if the plain "now + duration"
     // snooze would land on a holiday, a weekly off day, or outside office
@@ -1104,7 +1143,7 @@ class NotificationService {
     // being (re)scheduled below, and it must never leave the Alarm
     // screen's Snooze button spinning forever waiting on it.
     try {
-      await _markSnoozed(taskId, until).timeout(const Duration(seconds: 3));
+      await _markSnoozed(taskId, until, source).timeout(const Duration(seconds: 3));
     } catch (_) {}
 
     // Keeps the server's reminderAt in step with the new snooze time --
@@ -1113,18 +1152,23 @@ class NotificationService {
     // before the snooze window ends (see cancelOverdueAlarm's own doc
     // comment on why that can happen) would treat it as overdue for
     // catch-up firing again immediately, ignoring the snooze entirely.
+    // Only for the task's own real reminderAt (source == 'overdue') --
+    // syncing this field to an extraReminder instant's snooze time would
+    // silently overwrite the task's actual due-date reminder with an
+    // unrelated value.
     //
     // Not awaited, same reasoning as cancelOverdueAlarm's own call to this
     // -- best-effort background sync, bounded by its own 8s timeout,
     // that must never add to how long the Alarm screen's Snooze button
     // sits spinning under a slow connection.
-    unawaited(_syncReminderToServer(taskId, until));
+    if (source == 'overdue') unawaited(_syncReminderToServer(taskId, until));
 
     await scheduleOverdueAlarmAt(
       taskId: taskId,
       taskName: taskName,
       spaceName: spaceName,
       when: until,
+      source: source,
     );
   }
 }
@@ -1187,13 +1231,20 @@ Future<void> _handleNotificationTap(NotificationResponse response) async {
 
   final taskName = data['taskName'] as String? ?? 'Task';
   final spaceName = data['spaceName'] as String? ?? '';
+  // Same 'source' the alarm payload carries (see _alarmPayload's own doc
+  // comment) -- the notification tray's own quick-action buttons bypass
+  // AlarmScreen entirely, so this is this path's only chance to learn
+  // whether it's dismissing the task's real overdue alarm or one of its
+  // extraReminders instants.
+  final source = (data['source'] as String?) ?? 'overdue';
 
   switch (response.actionId) {
     case 'snooze_action':
-      await NotificationService.instance.snoozeOverdueAlarm(taskId: taskId, taskName: taskName, spaceName: spaceName);
+      await NotificationService.instance
+          .snoozeOverdueAlarm(taskId: taskId, taskName: taskName, spaceName: spaceName, source: source);
       break;
     case 'end_action':
-      await NotificationService.instance.cancelOverdueAlarm(taskId);
+      await NotificationService.instance.cancelOverdueAlarm(taskId, source: source);
       break;
     default:
       // Plain tap on the notification body, or the full-screen intent

@@ -373,7 +373,7 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
   final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet();
   final stillOverdueIds = <String>{};
   final now = DateTime.now();
-  var urgentCount = 0;
+  var consideredCount = 0;
   final currentUserId = await ApiClient.instance.readCurrentUserId();
 
   final rawSnoozeMap = prefs.getString(_snoozedUntilKey);
@@ -385,13 +385,13 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
   }
   var snoozeMapChanged = false;
   // See consumeFirstRunBaseline's doc comment (task_update_tracker.dart) --
-  // without this, every Urgent task whose reminderAt had already passed on
-  // a brand new device (or a never-before-seen account on this one) rang
+  // without this, every task whose reminderAt had already passed on a
+  // brand new device (or a never-before-seen account on this one) rang
   // the full-screen alarm for its ENTIRE backlog the moment this ran, same
   // key/category this file's foreground counterpart
   // (notifications_provider.dart) uses so neither path re-triggers the
   // storm the other just suppressed.
-  final isFirstRun = await consumeFirstRunBaseline(
+  final isFirstRun = await peekFirstRunBaseline(
     'overdue_alarm',
     currentUserId,
     legacyDataExists: overdueLegacyDataExists,
@@ -402,18 +402,16 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
     final isComplete = status.contains('complete') || status.contains('done');
     if (isComplete) continue;
 
-    // The loud full-screen alarm is reserved for Urgent tasks only -- see
-    // the matching check in notifications_provider.dart's foreground pass.
-    if ((t['priority'] ?? '').toString() != 'Urgent') continue;
     // `tasks` (/tasks/mine/all) includes subordinates' tasks too for a
-    // manager/senior -- without this, a junior's Urgent overdue task
-    // would also ring the full-screen alarm on their senior's phone. The
-    // alarm is assignee-only; see the matching guard in
-    // notifications_provider.dart's foreground pass.
+    // manager/senior -- without this, a junior's overdue task would also
+    // ring the full-screen alarm on their senior's phone. The alarm is
+    // assignee-only; see the matching guard in notifications_provider.dart's
+    // foreground pass. Deliberately NOT restricted to Urgent any more --
+    // see the matching change (and its doc comment) in that same pass.
     final assigneeIdRaw = t['assigneeId'];
     final taskAssigneeId = (assigneeIdRaw is Map ? assigneeIdRaw['_id'] : assigneeIdRaw)?.toString();
     if (taskAssigneeId == null || taskAssigneeId != currentUserId) continue;
-    urgentCount++;
+    consideredCount++;
 
     // The alarm rings at reminderAt now, not dueDate -- see the matching
     // change in notifications_provider.dart's foreground pass.
@@ -471,8 +469,21 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
     stillOverdueIds.add(id);
 
     if (!alreadyAlerted) {
-      print('[WATCHER] firing overdue alarm for taskId=$id "$title" due=$due (now=$now)');
-      await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
+      // Re-checked fresh, right before actually ringing -- `alertedIds`
+      // was snapshotted at the top of this tick, and the tasks fetch this
+      // tick waits on can take a moment, during which a concurrent End
+      // tap on the Alarm screen (markOverdueAlarmHandled, in the main
+      // isolate) can land for this exact task. Without this, the stale
+      // alreadyAlerted=false captured above would still ring a SECOND
+      // alarm for a task the person just dismissed.
+      await prefs.reload();
+      final freshlyAlerted = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).contains(id);
+      if (freshlyAlerted) {
+        print('[WATCHER] taskId=$id was alerted concurrently (End tap), skipping duplicate fire');
+      } else {
+        print('[WATCHER] firing overdue alarm for taskId=$id "$title" due=$due (now=$now)');
+        await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
+      }
     } else {
       // Already fired for this task in an earlier tick -- expected on every
       // tick after the first for the same overdue task, not a failure.
@@ -483,10 +494,11 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
   if (snoozeMapChanged) {
     await prefs.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
   }
-  // Printed every tick (not just on a hit) so a run with zero Urgent tasks,
-  // or Urgent tasks that just aren't overdue yet, is distinguishable from
-  // one where a task was overdue but something above silently swallowed it.
-  print('[WATCHER] overdue check: $urgentCount urgent task(s) seen, ${stillOverdueIds.length} currently overdue');
+  // Printed every tick (not just on a hit) so a run with zero of this
+  // account's own tasks, or none of them overdue yet, is distinguishable
+  // from one where a task was overdue but something above silently
+  // swallowed it.
+  print('[WATCHER] overdue check: $consideredCount task(s) seen, ${stillOverdueIds.length} currently overdue');
 
   // Re-check who's actually snoozed with a FRESH read, right before
   // persisting -- this tick's own tasks fetch takes a moment, so a
@@ -512,14 +524,25 @@ Future<void> _checkOverdueTasksOnce(List<Map<String, dynamic>> tasks, Notificati
     } catch (_) {}
   }
 
-  // Merge rather than replace: notifications_provider.dart's own foreground
-  // pass writes this same key independently, and the two loops running at
-  // different moments shouldn't be able to erase each other's "already
-  // alerted" record for a task the other one is the one that saw.
+  // Merged against a FRESH read, not just this tick's own stale `alertedIds`
+  // snapshot -- `{...alertedIds, ...stillOverdueIds}` alone still misses a
+  // concurrent End tap (markOverdueAlarmHandled, main isolate) for a task
+  // this tick's own loop never touched at all this pass (e.g. `now`
+  // captured at tick start was a moment before that task's reminderAt, so
+  // `due.isBefore(now)` skipped it entirely -- never added to
+  // stillOverdueIds, so the old `{...alertedIds, ...stillOverdueIds}`
+  // write would silently drop the concurrent mark). `addedConcurrently`
+  // captures only ids that appeared on disk AFTER this tick started,
+  // same reasoning as notifications_provider.dart's matching merge, so a
+  // task this tick's own logic deliberately decided to prune stays
+  // pruned.
+  final freshAlertedIds = (await prefs.reload().then((_) => prefs.getStringList(_alertedOverdueIdsKey))) ?? const [];
+  final addedConcurrently = freshAlertedIds.toSet().difference(alertedIds);
   await prefs.setStringList(
     _alertedOverdueIdsKey,
-    {...alertedIds, ...stillOverdueIds}.difference(freshlySnoozedIds).toList(),
+    {...alertedIds, ...stillOverdueIds, ...addedConcurrently}.difference(freshlySnoozedIds).toList(),
   );
+  if (isFirstRun) await markFirstRunBaselineDone('overdue_alarm', currentUserId);
 }
 
 // Full-screen alarm catch-up for Task.js's extraReminders -- the same
@@ -545,7 +568,7 @@ Future<void> _checkExtraRemindersOnce(List<Map<String, dynamic>> tasks, Notifica
   // _checkOverdueTasksOnce's own guard, applied to this separate
   // "extraReminders" category so a brand new device/account doesn't also
   // flood every already-passed extra reminder as a fresh alarm.
-  final isFirstRun = await consumeFirstRunBaseline(
+  final isFirstRun = await peekFirstRunBaseline(
     'extra_reminder',
     currentUserId,
     legacyDataExists: extraReminderLegacyDataExists,
@@ -603,7 +626,19 @@ Future<void> _checkExtraRemindersOnce(List<Map<String, dynamic>> tasks, Notifica
         firedCount++;
         if (isUrgent) {
           print('[WATCHER] firing extra-reminder alarm for taskId=$id "$title" reminderAt=$when (now=$now)');
-          await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
+          // source: 'extraReminder' -- NOT the default 'overdue'. This
+          // instant's own "already alerted" bookkeeping is entirely
+          // self-contained above (stillPendingKeys/_alertedExtraReminderIdsKey),
+          // so alarm_screen.dart's End button must NOT also mark this
+          // task's unrelated due-date/reminderAt alarm as alerted in
+          // _alertedOverdueIdsKey -- doing so would permanently suppress
+          // the task's real overdue alarm the next time it's actually due.
+          await NotificationService.instance.showOverdueAlarmNow(
+            taskId: id,
+            taskName: title,
+            spaceName: spaceName,
+            source: 'extraReminder',
+          );
         } else {
           print('[WATCHER] firing extra-reminder (non-Urgent, quiet) for taskId=$id "$title" reminderAt=$when (now=$now)');
           await NotificationService.instance.showNow(
@@ -618,6 +653,7 @@ Future<void> _checkExtraRemindersOnce(List<Map<String, dynamic>> tasks, Notifica
 
   print('[WATCHER] extra reminder check: $firedCount alarm(s) fired this tick');
   await prefs.setStringList(_alertedExtraReminderIdsKey, {...alertedInstantKeys, ...stillPendingKeys}.toList());
+  if (isFirstRun) await markFirstRunBaselineDone('extra_reminder', currentUserId);
 }
 
 // "Compulsory" per-task notifications (new assignment, or any edit) --
@@ -724,7 +760,7 @@ Future<void> _checkTeamEscalationsOnce(NotificationSchedule schedule, SharedPref
   // _checkOverdueTasksOnce above -- same reasoning, this category's own
   // key so a brand new device/account's already-1-day-overdue reports
   // don't all fire as fresh "Team overdue" alerts at once.
-  final isFirstRun = await consumeFirstRunBaseline(
+  final isFirstRun = await peekFirstRunBaseline(
     'escalation',
     currentUserId,
     legacyDataExists: escalationLegacyDataExists,
@@ -763,6 +799,7 @@ Future<void> _checkTeamEscalationsOnce(NotificationSchedule schedule, SharedPref
   }
 
   await prefs.setStringList(_alertedEscalationIdsKey, {...alertedIds, ...stillEscalatedIds}.toList());
+  if (isFirstRun) await markFirstRunBaselineDone('escalation', currentUserId);
 }
 
 // Delegator-side alert while the app is fully closed -- mirrors the
@@ -786,7 +823,7 @@ Future<void> _checkPendingApprovalsOnce(NotificationSchedule schedule, SharedPre
   final currentUserId = await ApiClient.instance.readCurrentUserId();
   // See consumeFirstRunBaseline's doc comment / the matching guard in
   // _checkTeamEscalationsOnce above.
-  final isFirstRun = await consumeFirstRunBaseline(
+  final isFirstRun = await peekFirstRunBaseline(
     'approval',
     currentUserId,
     legacyDataExists: approvalLegacyDataExists,
@@ -823,6 +860,7 @@ Future<void> _checkPendingApprovalsOnce(NotificationSchedule schedule, SharedPre
   }
 
   await prefs.setStringList(_alertedApprovalIdsKey, {...alertedIds, ...stillPendingIds}.toList());
+  if (isFirstRun) await markFirstRunBaselineDone('approval', currentUserId);
 }
 
 // Morning "today's tasks" summary and end-of-day "how the day went"

@@ -229,13 +229,46 @@ String? _latestActivityActorId(Map<String, dynamic> t) {
 /// waiting for the natural first call -- only a genuinely data-less
 /// account (the actual fresh-device/fresh-account case this was built
 /// for) gets the silent-baseline treatment.
-Future<bool> consumeFirstRunBaseline(String category, String? currentUserId, {required bool legacyDataExists}) async {
+String _firstRunBaselineKey(String category, String? currentUserId) => currentUserId != null
+    ? 'first_run_baseline_${category}_$currentUserId'
+    : 'first_run_baseline_$category';
+
+/// Split from the old single consumeFirstRunBaseline into a read-only
+/// "peek" (this) plus markFirstRunBaselineDone below, called only AFTER
+/// the caller has actually saved this tick's baseline "already alerted"
+/// ids. The original version set the done-flag immediately, before the
+/// caller's own loop went on to collect and save those ids -- on a
+/// genuinely fresh device/account, that left a real window where a
+/// SEPARATE isolate (notifications_provider.dart's foreground pass and
+/// background_watcher_service.dart's background tick both check these
+/// same categories independently) could read the flag as already-done
+/// but the ids list as still empty, and treat that as "not first run,
+/// nothing alerted yet" -- running its normal catch-up logic against an
+/// empty "already alerted" set and firing for every already-passed
+/// overdue/escalation/approval item at once. Confirmed live: this is
+/// exactly what caused multiple old notification banners to fire
+/// together on a brand new device, intermittently (depending on how the
+/// two isolates' timing happened to line up that particular login).
+/// Delaying the flag write until after the ids are saved closes that
+/// window: the flag can now only become true once real baseline data is
+/// already there to be read alongside it.
+Future<bool> peekFirstRunBaseline(String category, String? currentUserId, {required bool legacyDataExists}) async {
   final prefs = await SharedPreferences.getInstance();
-  final key = currentUserId != null
-      ? 'first_run_baseline_${category}_$currentUserId'
-      : 'first_run_baseline_$category';
+  final key = _firstRunBaselineKey(category, currentUserId);
   final alreadyRan = prefs.getBool(key) ?? false;
   if (alreadyRan) return false;
-  await prefs.setBool(key, true);
-  return !legacyDataExists;
+  if (legacyDataExists) {
+    // Grandfathered account (see this function's own doc comment) --
+    // nothing to baseline, so it's safe to mark this done right away.
+    await prefs.setBool(key, true);
+    return false;
+  }
+  return true;
+}
+
+/// Call once, right after saving this tick's baseline ids, only when
+/// peekFirstRunBaseline above returned true.
+Future<void> markFirstRunBaselineDone(String category, String? currentUserId) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool(_firstRunBaselineKey(category, currentUserId), true);
 }

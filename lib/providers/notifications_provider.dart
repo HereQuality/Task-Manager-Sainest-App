@@ -70,6 +70,21 @@ Future<void> _saveAlertedIds(Set<String> ids) async {
   await prefs.setStringList(_alertedOverdueIdsKey, ids.toList());
 }
 
+/// Called by alarm_screen.dart's "End" button the instant someone
+/// dismisses a ringing/pending alarm, so this task is recorded as
+/// "already alerted" right away -- previously that recording only
+/// happened on the NEXT feed/watcher poll after the alarm fired (see the
+/// catch-up loop below), which never ran at all if the person logged out
+/// shortly after tapping End. On a later login (even months later), the
+/// catch-up loop would then treat that same already-handled task as
+/// brand new and ring its alarm again. This makes End itself durable,
+/// independent of whether another poll ever runs afterward.
+Future<void> markOverdueAlarmHandled(String taskId) async {
+  final ids = await _loadAlertedIds();
+  ids.add(taskId);
+  await _saveAlertedIds(ids);
+}
+
 Future<Set<String>> _loadAlertedEscalationIds() async {
   final prefs = await SharedPreferences.getInstance();
   return (prefs.getStringList(_alertedEscalationIdsKey) ?? []).toSet();
@@ -102,16 +117,33 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   if (!settings.masterEnabled) return items;
 
   final now = DateTime.now();
-  final tasks = await ref.watch(myTasksProvider.future);
-  // The company-wide holidays/weekly-off/office-hours window (see
-  // notification_schedule.dart) -- fetched once per feed build and reused
-  // below for every OS-level notification this function might fire
-  // (including the full-screen alarm), same rule email.service.js
-  // already applies server-side to task emails. Feed LIST items further
-  // down (the in-app "Overdue"/"Due soon" entries) are deliberately NOT
-  // gated by this -- it only suppresses actual push/alarm notifications,
-  // not what shows when the person opens the app themselves.
-  final schedule = await fetchNotificationSchedule();
+  // tasks/schedule/visibleSpaceIds are three independent network reads with
+  // no shared state and no side effects of their own -- fetching them one
+  // after another (the previous shape here) just stacks their latencies for
+  // no reason. Running them together is what actually cuts the feed's
+  // worst-case load time; everything past this point still runs in the same
+  // order as before, since every side-effect loop below only starts once
+  // all three are already in hand.
+  final results = await Future.wait([
+    ref.watch(myTasksProvider.future),
+    // The company-wide holidays/weekly-off/office-hours window (see
+    // notification_schedule.dart) -- fetched once per feed build and reused
+    // below for every OS-level notification this function might fire
+    // (including the full-screen alarm), same rule email.service.js
+    // already applies server-side to task emails. Feed LIST items further
+    // down (the in-app "Overdue"/"Due soon" entries) are deliberately NOT
+    // gated by this -- it only suppresses actual push/alarm notifications,
+    // not what shows when the person opens the app themselves.
+    fetchNotificationSchedule(),
+    // Gates the "team task" branch below to Spaces this viewer can
+    // actually see -- moved up here (it used to be fetched later, after
+    // `changes`) purely so it's part of this same parallel batch; nothing
+    // below depends on fetch order between these three.
+    fetchMyVisibleSpaceIds(),
+  ]);
+  final tasks = results[0] as List<Map<String, dynamic>>;
+  final schedule = results[1] as NotificationSchedule;
+  final visibleSpaceIds = results[2] as Set<String>;
   final withinWindow = schedule.isWithinWindow(now);
 
   // New task assignments and any edit to an existing task -- independent
@@ -138,11 +170,11 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   // background_watcher_service.dart's matching fix.
   final currentUserId = ref.watch(authProvider).user?.id;
   final changes = await detectTaskChanges(tasks, currentUserId: currentUserId);
-  // Gates the "team task" branch below to Spaces this viewer can actually
-  // see (member, SuperAdmin, or Full Access) -- see TaskChangeResult.
-  // spaceId's own doc comment for why listMyTasksAll's broader "every
-  // report's task, any Space" visibility isn't the right scope for a push.
-  final visibleSpaceIds = await fetchMyVisibleSpaceIds();
+  // visibleSpaceIds (gates the "team task" branch below to Spaces this
+  // viewer can actually see -- member, SuperAdmin, or Full Access; see
+  // TaskChangeResult.spaceId's own doc comment for why listMyTasksAll's
+  // broader "every report's task, any Space" visibility isn't the right
+  // scope for a push) was already fetched above, alongside tasks/schedule.
   // myTasksProvider ("/tasks/mine/all") mixes a manager/senior's own
   // tasks together with every subordinate's (see
   // task.controller.js#listMyTasksAll) -- this map is what tells "my
@@ -183,10 +215,10 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // only path. The team-task branch below has no server push
       // counterpart at all (task.controller.js only pushes to the
       // assignee) and always needs this regardless of platform.
+      final body = change.activityMessage ??
+          (change.isNew ? 'Assigned to you' : 'Task updated') +
+              (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
       if (!Platform.isIOS) {
-        final body = change.activityMessage ??
-            (change.isNew ? 'Assigned to you' : 'Task updated') +
-                (change.spaceName.isNotEmpty ? ' · ${change.spaceName}' : '');
         await NotificationService.instance.showTaskUpdateNotification(
           taskId: change.taskId,
           title: change.isNew ? 'New task: ${change.title}' : change.title,
@@ -255,7 +287,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     // become newly escalated from here on. legacyDataExists read before
     // _saveAlertedEscalationIds below writes to this key this tick.
     final escalationPrefs = await SharedPreferences.getInstance();
-    final isFirstRun = await consumeFirstRunBaseline(
+    final isFirstRun = await peekFirstRunBaseline(
       'escalation',
       currentUserId,
       legacyDataExists: escalationPrefs.containsKey(_alertedEscalationIdsKey),
@@ -296,6 +328,9 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       }
     }
     await _saveAlertedEscalationIds(stillEscalatedIds);
+    // Written only now, after the ids above are already saved -- see
+    // peekFirstRunBaseline's own doc comment for why the order matters.
+    if (isFirstRun) await markFirstRunBaselineDone('escalation', currentUserId);
   }
 
   // Delegator-side alert: a delegate asked to mark a delegated task
@@ -309,7 +344,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     // See consumeFirstRunBaseline's doc comment / the matching guard on
     // the escalations block above.
     final approvalPrefs = await SharedPreferences.getInstance();
-    final isFirstRunApprovals = await consumeFirstRunBaseline(
+    final isFirstRunApprovals = await peekFirstRunBaseline(
       'approval',
       currentUserId,
       legacyDataExists: approvalPrefs.containsKey(_alertedApprovalIdsKey),
@@ -344,6 +379,46 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       }
     }
     await _saveAlertedApprovalIds(stillPendingIds);
+    if (isFirstRunApprovals) await markFirstRunBaselineDone('approval', currentUserId);
+  }
+
+  // "A task was just assigned to you" -- deliberately its OWN loop, not
+  // nested inside the `if (settings.taskDueReminders)` block below: that
+  // setting is specifically about due-date/overdue reminders and the
+  // alarm, entirely unrelated to "was I just assigned something". It used
+  // to live inside that block (simpler, one fewer pass over `tasks`), but
+  // that silently gated assignment notifications on the due-reminders
+  // toggle too -- someone with "Task due reminders" off but "Task
+  // assigned" on never saw a new-assignment notification at all.
+  for (final t in tasks) {
+    final assigneeIdRaw = t['assigneeId'];
+    final taskAssigneeId = (assigneeIdRaw is Map ? assigneeIdRaw['_id'] : assigneeIdRaw)?.toString();
+    final isMine = taskAssigneeId != null && taskAssigneeId == currentUserId;
+    if (!isMine || !settings.myTaskNotifications || !settings.taskAssigned) continue;
+
+    final title = (t['title'] ?? t['name'] ?? 'Untitled task').toString();
+    final id = (t['_id'] ?? t['id'] ?? title).toString();
+    final spaceName = (t['spaceName'] ?? '').toString();
+    // Recomputed from the task's own createdAt every build (same pattern
+    // as the overdue/due-soon items below), rather than from the one-shot
+    // `changes` diff above, so it keeps showing here across refreshes
+    // instead of only appearing once and then vanishing the moment
+    // detectTaskChanges advances its own "already seen" snapshot. Capped
+    // to the last 2 days, same window taskDueReminders' own "due soon"
+    // check uses, so this doesn't just accumulate forever.
+    final createdRaw = t['createdAt'];
+    final created = createdRaw == null ? null : DateTime.tryParse(createdRaw.toString());
+    if (created != null && now.difference(created).inHours <= 48) {
+      items.add(AppNotification(
+        id: 'assigned_$id',
+        kind: NotificationKind.taskAssigned,
+        title: 'New task: $title',
+        body: spaceName.isNotEmpty ? 'Assigned to you · $spaceName' : 'Assigned to you',
+        timestamp: created,
+        refId: id,
+        spaceName: spaceName.isNotEmpty ? spaceName : null,
+      ));
+    }
   }
 
   if (settings.taskDueReminders) {
@@ -360,7 +435,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     // only ringing for reminders that pass from here on. legacyDataExists
     // must be read BEFORE anything below writes to _alertedOverdueIdsKey
     // this tick.
-    final isFirstRunOverdue = await consumeFirstRunBaseline(
+    final isFirstRunOverdue = await peekFirstRunBaseline(
       'overdue_alarm',
       currentUserId,
       legacyDataExists: prefsForSnooze.containsKey(_alertedOverdueIdsKey),
@@ -381,11 +456,6 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       final title = (t['title'] ?? t['name'] ?? 'Untitled task').toString();
       final id = (t['_id'] ?? t['id'] ?? title).toString();
       final spaceName = (t['spaceName'] ?? '').toString();
-      // The loud full-screen alarm (sound, lock-screen takeover,
-      // Snooze/Complete) is reserved for Urgent tasks only -- High/Normal/
-      // Low overdue tasks still show in this feed and still get the
-      // quieter due-soon reminder below, just never the alarm treatment.
-      final isUrgent = (t['priority'] ?? '').toString() == 'Urgent';
       // `tasks` (myTasksProvider) includes subordinates' tasks too for a
       // manager/senior (see task.controller.js#listMyTasksAll), so without
       // this check a junior's Urgent overdue task would also ring the
@@ -398,10 +468,28 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       final isMine = taskAssigneeId != null && taskAssigneeId == currentUserId;
 
       if (isComplete) {
-        // Done -- stop any pending/ringing alarm for it.
-        // ignore: avoid_print
-        print('[FEED] taskId=$id isComplete=true, cancelling any pending/ringing alarm');
-        await NotificationService.instance.cancelOverdueAlarm(id);
+        // Done -- stop any pending/ringing alarm for it. Assignee-only --
+        // `tasks` (myTasksProvider) includes a manager/senior's
+        // subordinates' tasks too (see isMine's own doc comment above),
+        // and the full-screen alarm has always been assignee-only, so a
+        // manager never has a local alarm armed for a subordinate's task
+        // in the first place. Without this check, EVERY completed
+        // subordinate task on EVERY feed rebuild called
+        // cancelOverdueAlarm, which (see its own doc comment) also syncs
+        // reminderAt: null to the server -- PUT /tasks/:id/reminder
+        // correctly rejects that with 403 ("Only this task's assignee can
+        // change its reminder") since the manager isn't the assignee.
+        // Confirmed live in production server logs: hundreds of repeated
+        // 403s on this exact endpoint, one per completed subordinate
+        // task, on every single feed refresh -- pure server-log noise
+        // (and a wasted network call) with no actual effect, since the
+        // request was always going to be rejected, but it ran on every
+        // poll for every manager/senior account regardless.
+        if (isMine) {
+          // ignore: avoid_print
+          print('[FEED] taskId=$id isComplete=true, cancelling any pending/ringing alarm');
+          await NotificationService.instance.cancelOverdueAlarm(id);
+        }
         continue;
       }
 
@@ -502,8 +590,13 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // The loud full-screen alarm (sound, lock-screen takeover, Snooze/
       // End) rings at reminderAt -- a date/time set independently of
       // dueDate specifically so the alarm doesn't have to match when the
-      // work is actually due. Urgent AND assignee-only, same as before.
-      if (!isUrgent || !isMine) continue;
+      // work is actually due. Assignee-only -- deliberately NOT restricted
+      // to Urgent any more: any task with a reminderAt set gets the full
+      // alarm treatment, regardless of priority. (Previously Urgent-only;
+      // removed per explicit request -- the alarm should fire purely off
+      // the reminder date/time someone set, with no priority condition
+      // layered on top.)
+      if (!isMine) continue;
       final reminderRaw = t['reminderAt'];
       final reminder = reminderRaw == null ? null : DateTime.tryParse(reminderRaw.toString());
       if (reminder == null) continue;
@@ -547,20 +640,31 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         // inside the window catches it up instead of it ringing late for
         // one moment and then never again.
         if (!stillSnoozed && !alreadyAlerted && !isFirstRunOverdue && withinWindow) {
-          // ignore: avoid_print
-          print('[FEED] firing overdue alarm for taskId=$id "$title" (foreground feed pass)');
-          await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
-          // Posting the notification above only gets Android to launch
-          // the full-screen intent when the app is backgrounded/closed
-          // or the device is locked -- while the app is open and in the
-          // foreground (e.g. this ran because the person pulled to
-          // refresh the Notifications screen), Android just shows it as
-          // a plain heads-up banner instead of re-launching over
-          // whatever's already on screen. Setting this directly is what
-          // actually takes the person to the full-screen Alarm view in
-          // that case, since the app can just navigate itself instead of
-          // waiting on the OS to do it.
-          pendingAlarmNotifier.value = {'taskId': id, 'taskName': title, 'spaceName': spaceName};
+          // Re-checked fresh, right before actually ringing -- `alertedIds`
+          // was snapshotted when this whole pass started, and myTasksProvider's
+          // own network fetch (the very first thing this pass does) can
+          // take a moment, during which a concurrent End tap on the Alarm
+          // screen (markOverdueAlarmHandled) can land for this exact task.
+          // Without this, the stale alreadyAlerted=false captured above
+          // would still ring a SECOND alarm for a task the person just
+          // dismissed seconds earlier.
+          final freshlyAlerted = (await _loadAlertedIds()).contains(id);
+          if (!freshlyAlerted) {
+            // ignore: avoid_print
+            print('[FEED] firing overdue alarm for taskId=$id "$title" (foreground feed pass)');
+            await NotificationService.instance.showOverdueAlarmNow(taskId: id, taskName: title, spaceName: spaceName);
+            // Posting the notification above only gets Android to launch
+            // the full-screen intent when the app is backgrounded/closed
+            // or the device is locked -- while the app is open and in the
+            // foreground (e.g. this ran because the person pulled to
+            // refresh the Notifications screen), Android just shows it as
+            // a plain heads-up banner instead of re-launching over
+            // whatever's already on screen. Setting this directly is what
+            // actually takes the person to the full-screen Alarm view in
+            // that case, since the app can just navigate itself instead of
+            // waiting on the OS to do it.
+            pendingAlarmNotifier.value = {'taskId': id, 'taskName': title, 'spaceName': spaceName};
+          }
         }
       } else {
         // Not due yet -- arm the alarm for the exact reminder moment
@@ -605,10 +709,26 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         }
       } catch (_) {}
     }
-    await _saveAlertedIds(stillAlertedIds.difference(freshlySnoozedIds));
+    // Merged with a FRESH read, not overwritten outright -- this whole
+    // pass (myTasksProvider's own fetch runs first) can take a while,
+    // during which markOverdueAlarmHandled (the Alarm screen's End
+    // button) can write a task's id straight to disk. A plain
+    // `_saveAlertedIds(stillAlertedIds...)` would silently erase that
+    // mark for any task this pass's own (now-stale) view decided not to
+    // include -- e.g. one outside the notification window -- making the
+    // alarm this person just dismissed come right back. Only ids added
+    // to disk AFTER this pass started are merged in (the "concurrent"
+    // set below): an id that was already present in the `alertedIds`
+    // snapshot at the top of this pass but isn't in stillAlertedIds was
+    // deliberately pruned by this pass's own logic (task completed,
+    // reminder changed) and must still be dropped.
+    final latestAlertedIds = await _loadAlertedIds();
+    final concurrentlyAdded = latestAlertedIds.difference(alertedIds);
+    await _saveAlertedIds(stillAlertedIds.union(concurrentlyAdded).difference(freshlySnoozedIds));
     if (snoozeMapChanged) {
       await prefsForSnooze.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
     }
+    if (isFirstRunOverdue) await markFirstRunBaselineDone('overdue_alarm', currentUserId);
   }
 
   if (settings.ticketUpdates) {

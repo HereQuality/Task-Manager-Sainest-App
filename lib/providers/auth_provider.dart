@@ -7,6 +7,8 @@ import '../core/background_watcher_service.dart';
 import '../core/notification_service.dart';
 import '../core/push_service.dart';
 import '../models/user.dart';
+import 'employees_provider.dart';
+import 'spaces_provider.dart' show spacesProvider;
 
 enum AuthStatus { unknown, authenticated, unauthenticated }
 
@@ -22,7 +24,7 @@ class AuthState {
 }
 
 class AuthNotifier extends StateNotifier<AuthState> {
-  AuthNotifier() : super(const AuthState()) {
+  AuthNotifier(this._ref) : super(const AuthState()) {
     _restoreSession();
     // See sessionExpiredNotifier's own doc comment in api_client.dart --
     // without this, a 401 anywhere in the app (expired/revoked token)
@@ -33,6 +35,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
     sessionExpiredNotifier.addListener(_onSessionExpired);
   }
 
+  final Ref _ref;
   final _dio = ApiClient.instance;
 
   // Set the instant state becomes authenticated (both login() and a
@@ -65,6 +68,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
     pendingAlarmNotifier.value = null;
     stopBackgroundWatcher();
+    // Same reasoning as logout()'s own invalidate calls -- a session
+    // dying this way (401) is just as much an account boundary as an
+    // explicit Log out tap.
+    _ref.invalidate(spacesProvider);
+    _ref.invalidate(assignableEmployeesProvider);
     state = const AuthState(
       status: AuthStatus.unauthenticated,
       error: 'Your session has expired. Please log in again.',
@@ -270,8 +278,17 @@ class AuthNotifier extends StateNotifier<AuthState> {
     // it just rang. Logging out is the one guaranteed checkpoint to wipe
     // it, so no login can ever inherit another session's leftover alarm.
     pendingAlarmNotifier.value = null;
+    // spacesProvider/assignableEmployeesProvider are cached for the app's
+    // whole lifetime now (not autoDispose -- see their own doc comments),
+    // specifically so reopening Add Task doesn't re-fetch them every time.
+    // Without this, a different account logging into this same app
+    // instance right after would see the PREVIOUS account's cached
+    // Employee/Space lists in every picker until something else happened
+    // to invalidate them.
+    _ref.invalidate(spacesProvider);
+    _ref.invalidate(assignableEmployeesProvider);
     state = const AuthState(status: AuthStatus.unauthenticated);
   }
 }
 
-final authProvider = StateNotifierProvider<AuthNotifier, AuthState>((ref) => AuthNotifier());
+final authProvider = StateNotifierProvider<AuthNotifier, AuthState>((ref) => AuthNotifier(ref));

@@ -36,7 +36,7 @@ Android release builds sign with `android/key.properties` (gitignored; template 
 ### State management
 Riverpod (`flutter_riverpod`), no code generation. Two shapes are used deliberately:
 - `StateNotifierProvider` for real client state: `authProvider` (session), `settingsProvider` (notification prefs).
-- `FutureProvider.autoDispose` for server data: `myTasksProvider`, `dashboardStatsProvider`, `spacesProvider`, `ticketsProvider`, `assignableEmployeesProvider`, `notificationsFeedProvider`, etc.
+- `FutureProvider.autoDispose` for server data: `myTasksProvider`, `dashboardStatsProvider`, `ticketsProvider`, `notificationsFeedProvider`, etc. Two deliberate exceptions, kept alive for the whole session and explicitly invalidated on logout/session-expiry in `auth_provider.dart` instead: `spacesProvider` and `assignableEmployeesProvider` (see their own doc comments in `spaces_provider.dart`/`employees_provider.dart`) -- Add Task is reachable from every tab, not just the Tasks screen, so autoDispose would re-fetch both from scratch on every single open.
 
 Most API responses are passed around as raw `Map<String, dynamic>` rather than typed models — only `AppUser` (`lib/models/user.dart`) and `AppNotification` (`lib/models/notification_item.dart`) are modeled classes. Follow that pattern rather than introducing new DTOs for tasks/tickets/spaces unless a screen's complexity actually demands it.
 

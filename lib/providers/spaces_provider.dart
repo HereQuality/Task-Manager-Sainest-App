@@ -4,7 +4,19 @@ import '../core/api_client.dart';
 /// Spaces the current user belongs to -- GET /api/v1/spaces (same
 /// endpoint the web app's sidebar/Spaces page uses). Powers the Space
 /// picker in the "Add task" sheet.
-final spacesProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
+///
+/// Deliberately NOT .autoDispose, unlike most FutureProviders in this app
+/// (see CLAUDE.md's State management section) -- the "+" tab that opens
+/// Add Task is reachable from every screen in home_shell.dart, not just
+/// tasks_screen.dart, so an autoDispose version would tear down and
+/// re-fetch from scratch every single time someone opens Add Task from
+/// anywhere but the Tasks tab (tasks_screen.dart's own `ref.watch
+/// (spacesProvider)` is what keeps this warm while that screen happens to
+/// be the one mounted). Safe to keep alive for the whole session because
+/// auth_provider.dart's logout()/_onSessionExpired both explicitly
+/// invalidate it, so a different account logging in next never inherits
+/// a previous account's cached list.
+final spacesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   final res = await ApiClient.instance.dio.get('/spaces');
   final data = res.data['data'] ?? [];
   return List<Map<String, dynamic>>.from(data);
