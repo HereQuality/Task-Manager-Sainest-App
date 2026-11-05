@@ -13,6 +13,7 @@ import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 import 'api_client.dart';
 import 'notification_schedule.dart';
+import 'task_update_tracker.dart' show scopedKey;
 
 const _askedBatteryOptKey = 'asked_battery_opt_once';
 const _askedFullScreenIntentKey = 'asked_full_screen_intent_once';
@@ -1002,10 +1003,12 @@ class NotificationService {
   }
 
   Future<void> _markAlerted(String taskId) async {
+    final currentUserId = await ApiClient.instance.readCurrentUserId();
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
-    final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet()..add(taskId);
-    await prefs.setStringList(_alertedOverdueIdsKey, alertedIds.toList());
+    final key = scopedKey(_alertedOverdueIdsKey, currentUserId);
+    final alertedIds = (prefs.getStringList(key) ?? []).toSet()..add(taskId);
+    await prefs.setStringList(key, alertedIds.toList());
   }
 
   Future<void> cancel(int id) => _plugin.cancel(id);
@@ -1065,6 +1068,7 @@ class NotificationService {
   /// so it can be given its own timeout there without also timing out the
   /// actual alarm scheduling.
   Future<void> _markSnoozed(String taskId, DateTime until, String source) async {
+    final currentUserId = await ApiClient.instance.readCurrentUserId();
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
     // Only clear this task's REAL overdue/due-date alert record when
@@ -1076,11 +1080,13 @@ class NotificationService {
     // alert this task may already have, making it re-ring even though
     // nobody snoozed THAT one.
     if (source == 'overdue') {
-      final alertedIds = (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet()..remove(taskId);
-      await prefs.setStringList(_alertedOverdueIdsKey, alertedIds.toList());
+      final alertedKey = scopedKey(_alertedOverdueIdsKey, currentUserId);
+      final alertedIds = (prefs.getStringList(alertedKey) ?? []).toSet()..remove(taskId);
+      await prefs.setStringList(alertedKey, alertedIds.toList());
     }
 
-    final rawMap = prefs.getString(_snoozedUntilKey);
+    final snoozeKey = scopedKey(_snoozedUntilKey, currentUserId);
+    final rawMap = prefs.getString(snoozeKey);
     Map<String, dynamic> snoozedUntil = {};
     if (rawMap != null) {
       try {
@@ -1088,7 +1094,7 @@ class NotificationService {
       } catch (_) {}
     }
     snoozedUntil[taskId] = until.millisecondsSinceEpoch;
-    await prefs.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
+    await prefs.setString(snoozeKey, jsonEncode(snoozedUntil));
   }
 
   /// Same "Snooze" action the notification's button performs -- defaults to

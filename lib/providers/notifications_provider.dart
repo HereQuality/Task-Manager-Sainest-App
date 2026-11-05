@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../core/api_client.dart';
 import '../core/notification_schedule.dart';
 import '../core/notification_service.dart';
 import '../core/task_update_tracker.dart';
@@ -35,14 +36,14 @@ const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
 /// notification's owning app (that needs a NotificationListenerService,
 /// a much heavier, separately-granted permission), so there's no signal
 /// to react to there.
-Future<Set<String>> _loadSeenIds() async {
+Future<Set<String>> _loadSeenIds(String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  return (prefs.getStringList(_seenNotificationIdsKey) ?? []).toSet();
+  return (prefs.getStringList(scopedKey(_seenNotificationIdsKey, currentUserId)) ?? []).toSet();
 }
 
-Future<void> _saveSeenIds(Set<String> ids) async {
+Future<void> _saveSeenIds(Set<String> ids, String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setStringList(_seenNotificationIdsKey, ids.toList());
+  await prefs.setStringList(scopedKey(_seenNotificationIdsKey, currentUserId), ids.toList());
 }
 
 /// Called by NotificationsScreen once it's actually shown the current
@@ -51,7 +52,8 @@ Future<void> _saveSeenIds(Set<String> ids) async {
 /// of the 3-day window) is naturally dropped too, so this never grows
 /// unbounded.
 Future<void> markNotificationsSeen(List<AppNotification> currentFeed) async {
-  await _saveSeenIds(currentFeed.map((n) => n.id).toSet());
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+  await _saveSeenIds(currentFeed.map((n) => n.id).toSet(), currentUserId);
 }
 
 /// Which overdue tasks have already had their first "just became overdue"
@@ -60,14 +62,14 @@ Future<void> markNotificationsSeen(List<AppNotification> currentFeed) async {
 /// whatever snooze/complete state is already sitting in the notification
 /// tray. Persisted since the provider itself is `autoDispose` and loses
 /// in-memory state constantly.
-Future<Set<String>> _loadAlertedIds() async {
+Future<Set<String>> _loadAlertedIds(String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  return (prefs.getStringList(_alertedOverdueIdsKey) ?? []).toSet();
+  return (prefs.getStringList(scopedKey(_alertedOverdueIdsKey, currentUserId)) ?? []).toSet();
 }
 
-Future<void> _saveAlertedIds(Set<String> ids) async {
+Future<void> _saveAlertedIds(Set<String> ids, String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setStringList(_alertedOverdueIdsKey, ids.toList());
+  await prefs.setStringList(scopedKey(_alertedOverdueIdsKey, currentUserId), ids.toList());
 }
 
 /// Called by alarm_screen.dart's "End" button the instant someone
@@ -80,29 +82,30 @@ Future<void> _saveAlertedIds(Set<String> ids) async {
 /// brand new and ring its alarm again. This makes End itself durable,
 /// independent of whether another poll ever runs afterward.
 Future<void> markOverdueAlarmHandled(String taskId) async {
-  final ids = await _loadAlertedIds();
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+  final ids = await _loadAlertedIds(currentUserId);
   ids.add(taskId);
-  await _saveAlertedIds(ids);
+  await _saveAlertedIds(ids, currentUserId);
 }
 
-Future<Set<String>> _loadAlertedEscalationIds() async {
+Future<Set<String>> _loadAlertedEscalationIds(String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  return (prefs.getStringList(_alertedEscalationIdsKey) ?? []).toSet();
+  return (prefs.getStringList(scopedKey(_alertedEscalationIdsKey, currentUserId)) ?? []).toSet();
 }
 
-Future<void> _saveAlertedEscalationIds(Set<String> ids) async {
+Future<void> _saveAlertedEscalationIds(Set<String> ids, String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setStringList(_alertedEscalationIdsKey, ids.toList());
+  await prefs.setStringList(scopedKey(_alertedEscalationIdsKey, currentUserId), ids.toList());
 }
 
-Future<Set<String>> _loadAlertedApprovalIds() async {
+Future<Set<String>> _loadAlertedApprovalIds(String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  return (prefs.getStringList(_alertedApprovalIdsKey) ?? []).toSet();
+  return (prefs.getStringList(scopedKey(_alertedApprovalIdsKey, currentUserId)) ?? []).toSet();
 }
 
-Future<void> _saveAlertedApprovalIds(Set<String> ids) async {
+Future<void> _saveAlertedApprovalIds(Set<String> ids, String? currentUserId) async {
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setStringList(_alertedApprovalIdsKey, ids.toList());
+  await prefs.setStringList(scopedKey(_alertedApprovalIdsKey, currentUserId), ids.toList());
 }
 
 /// Builds the in-app notification feed from data the app already has
@@ -278,7 +281,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   // activity" toggles below, not the personal due-date reminder one.
   if (settings.teamEscalations) {
     final escalations = await fetchTeamOverdueEscalations();
-    final alertedEscalationIds = await _loadAlertedEscalationIds();
+    final alertedEscalationIds = await _loadAlertedEscalationIds(currentUserId);
     final stillEscalatedIds = <String>{};
     // See consumeFirstRunBaseline's doc comment: without this, every
     // already-1-day-overdue report's task on a brand new device (or a
@@ -290,7 +293,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     final isFirstRun = await peekFirstRunBaseline(
       'escalation',
       currentUserId,
-      legacyDataExists: escalationPrefs.containsKey(_alertedEscalationIdsKey),
+      legacyDataExists: escalationPrefs.containsKey(scopedKey(_alertedEscalationIdsKey, currentUserId)),
     );
     for (final t in escalations) {
       final id = (t['_id'] ?? '').toString();
@@ -327,7 +330,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         );
       }
     }
-    await _saveAlertedEscalationIds(stillEscalatedIds);
+    await _saveAlertedEscalationIds(stillEscalatedIds, currentUserId);
     // Written only now, after the ids above are already saved -- see
     // peekFirstRunBaseline's own doc comment for why the order matters.
     if (isFirstRun) await markFirstRunBaselineDone('escalation', currentUserId);
@@ -339,7 +342,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   // a due-date concept at all, it's an approval workflow.
   if (settings.approvalAlerts) {
     final approvals = await fetchPendingApprovals();
-    final alertedApprovalIds = await _loadAlertedApprovalIds();
+    final alertedApprovalIds = await _loadAlertedApprovalIds(currentUserId);
     final stillPendingIds = <String>{};
     // See consumeFirstRunBaseline's doc comment / the matching guard on
     // the escalations block above.
@@ -347,7 +350,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     final isFirstRunApprovals = await peekFirstRunBaseline(
       'approval',
       currentUserId,
-      legacyDataExists: approvalPrefs.containsKey(_alertedApprovalIdsKey),
+      legacyDataExists: approvalPrefs.containsKey(scopedKey(_alertedApprovalIdsKey, currentUserId)),
     );
     for (final t in approvals) {
       final id = (t['_id'] ?? '').toString();
@@ -378,7 +381,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
         );
       }
     }
-    await _saveAlertedApprovalIds(stillPendingIds);
+    await _saveAlertedApprovalIds(stillPendingIds, currentUserId);
     if (isFirstRunApprovals) await markFirstRunBaselineDone('approval', currentUserId);
   }
 
@@ -422,7 +425,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
   }
 
   if (settings.taskDueReminders) {
-    final alertedIds = await _loadAlertedIds();
+    final alertedIds = await _loadAlertedIds(currentUserId);
     // What actually gets persisted as "already alerted" (see
     // _alertedOverdueIdsKey doc comment) -- a still-snoozed task is
     // deliberately excluded from it below.
@@ -435,13 +438,32 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     // only ringing for reminders that pass from here on. legacyDataExists
     // must be read BEFORE anything below writes to _alertedOverdueIdsKey
     // this tick.
-    final isFirstRunOverdue = await peekFirstRunBaseline(
+    final isFirstRunOverdueLegacy = await peekFirstRunBaseline(
       'overdue_alarm',
       currentUserId,
-      legacyDataExists: prefsForSnooze.containsKey(_alertedOverdueIdsKey),
+      legacyDataExists: prefsForSnooze.containsKey(scopedKey(_alertedOverdueIdsKey, currentUserId)),
     );
+    // Separate one-time baseline for the Urgent-only -> any-priority alarm
+    // change: an existing device already has overdue_alarm's own legacy
+    // data (so the check above is never "first run" for it), but that data
+    // only ever recorded Urgent tasks -- every non-Urgent task with a past
+    // reminderAt was always `continue`d before it could reach alertedIds.
+    // Without this, every one of those now-newly-eligible tasks reads as
+    // brand new the first time this broadened logic runs and rings its
+    // catch-up alarm immediately, all in the same pass -- confirmed live as
+    // a flood of alarms/notifications landing right after login (this pass
+    // is one of the first things to run then). legacyDataExists is
+    // deliberately always false here: no install, old or new, could
+    // possibly have already baselined THIS category, so every account
+    // needs exactly one silent baselining pass under this new key.
+    final isFirstRunAnyPriority = await peekFirstRunBaseline(
+      'overdue_alarm_any_priority',
+      currentUserId,
+      legacyDataExists: false,
+    );
+    final isFirstRunOverdue = isFirstRunOverdueLegacy || isFirstRunAnyPriority;
 
-    final rawSnoozeMap = prefsForSnooze.getString(_snoozedUntilKey);
+    final rawSnoozeMap = prefsForSnooze.getString(scopedKey(_snoozedUntilKey, currentUserId));
     Map<String, dynamic> snoozedUntil = {};
     if (rawSnoozeMap != null) {
       try {
@@ -648,7 +670,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
           // Without this, the stale alreadyAlerted=false captured above
           // would still ring a SECOND alarm for a task the person just
           // dismissed seconds earlier.
-          final freshlyAlerted = (await _loadAlertedIds()).contains(id);
+          final freshlyAlerted = (await _loadAlertedIds(currentUserId)).contains(id);
           if (!freshlyAlerted) {
             // ignore: avoid_print
             print('[FEED] firing overdue alarm for taskId=$id "$title" (foreground feed pass)');
@@ -697,7 +719,7 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     // before the snooze completed, and never rang again.
     final freshSnoozePrefs = await SharedPreferences.getInstance();
     await freshSnoozePrefs.reload();
-    final freshRawSnoozeMap = freshSnoozePrefs.getString(_snoozedUntilKey);
+    final freshRawSnoozeMap = freshSnoozePrefs.getString(scopedKey(_snoozedUntilKey, currentUserId));
     final freshlySnoozedIds = <String>{};
     if (freshRawSnoozeMap != null) {
       try {
@@ -722,13 +744,14 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     // snapshot at the top of this pass but isn't in stillAlertedIds was
     // deliberately pruned by this pass's own logic (task completed,
     // reminder changed) and must still be dropped.
-    final latestAlertedIds = await _loadAlertedIds();
+    final latestAlertedIds = await _loadAlertedIds(currentUserId);
     final concurrentlyAdded = latestAlertedIds.difference(alertedIds);
-    await _saveAlertedIds(stillAlertedIds.union(concurrentlyAdded).difference(freshlySnoozedIds));
+    await _saveAlertedIds(stillAlertedIds.union(concurrentlyAdded).difference(freshlySnoozedIds), currentUserId);
     if (snoozeMapChanged) {
-      await prefsForSnooze.setString(_snoozedUntilKey, jsonEncode(snoozedUntil));
+      await prefsForSnooze.setString(scopedKey(_snoozedUntilKey, currentUserId), jsonEncode(snoozedUntil));
     }
-    if (isFirstRunOverdue) await markFirstRunBaselineDone('overdue_alarm', currentUserId);
+    if (isFirstRunOverdueLegacy) await markFirstRunBaselineDone('overdue_alarm', currentUserId);
+    if (isFirstRunAnyPriority) await markFirstRunBaselineDone('overdue_alarm_any_priority', currentUserId);
   }
 
   if (settings.ticketUpdates) {
@@ -759,7 +782,8 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
 
 final unreadNotificationCountProvider = FutureProvider.autoDispose<int>((ref) async {
   final items = await ref.watch(notificationsFeedProvider.future);
-  final seen = await _loadSeenIds();
+  final currentUserId = ref.watch(authProvider).user?.id;
+  final seen = await _loadSeenIds(currentUserId);
   return items.where((n) => !seen.contains(n.id)).length;
 });
 

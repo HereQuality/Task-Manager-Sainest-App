@@ -233,6 +233,25 @@ String _firstRunBaselineKey(String category, String? currentUserId) => currentUs
     ? 'first_run_baseline_${category}_$currentUserId'
     : 'first_run_baseline_$category';
 
+/// Same per-account scoping as _firstRunBaselineKey/_initializedKeyPrefix
+/// above, exposed for the alarm/notification tracking keys in
+/// notifications_provider.dart, background_watcher_service.dart, and
+/// notification_service.dart (overdue-alerted ids, snoozed-until map,
+/// escalation/approval-alerted ids, extra-reminder-alerted ids, seen
+/// notification ids). Those were still plain device-wide keys -- the exact
+/// bug this file's own top-of-file doc comment describes for
+/// _seenVersionsKeyPrefix/_initializedKeyPrefix, just never carried over
+/// to the alarm side: logging out of one account and into another on the
+/// same device left the previous account's "already alerted" ids sitting
+/// there, none of which match the new account's own task ids, so every
+/// one of ITS overdue/reminder tasks looked brand new and flooded in at
+/// once. Confirmed live as "flood of alarms/notifications right around
+/// logout/login" on a device that had more than one account signed into
+/// it. Falls back to the bare key when currentUserId isn't available, same
+/// as _firstRunBaselineKey.
+String scopedKey(String baseKey, String? currentUserId) =>
+    currentUserId != null ? '${baseKey}_$currentUserId' : baseKey;
+
 /// Split from the old single consumeFirstRunBaseline into a read-only
 /// "peek" (this) plus markFirstRunBaselineDone below, called only AFTER
 /// the caller has actually saved this tick's baseline "already alerted"
