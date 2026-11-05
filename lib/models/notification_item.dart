@@ -1,4 +1,4 @@
-enum NotificationKind { taskDueSoon, taskOverdue, ticketUpdate, taskAssigned }
+enum NotificationKind { taskDueSoon, taskOverdue, ticketUpdate, taskAssigned, teamOverdue, approvalNeeded }
 
 class AppNotification {
   final String id;

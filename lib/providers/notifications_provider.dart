@@ -298,6 +298,29 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     for (final t in escalations) {
       final id = (t['_id'] ?? '').toString();
       if (id.isEmpty) continue;
+      final title = (t['name'] ?? 'Untitled task').toString();
+      final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
+      final spaceName = (t['spaceName'] ?? '').toString();
+      // Added to the in-app feed unconditionally, every build, same as
+      // taskOverdue/taskDueSoon below -- unlike the one-shot banner further
+      // down (gated by alreadyAlerted so it only ever fires once), this
+      // list item is meant to keep showing for as long as the escalation
+      // itself is still live, not just the instant it was first noticed.
+      // Previously this whole block only ever posted the OS banner and
+      // never added anything here at all -- confirmed as a real gap:
+      // swipe the banner away (or it's missed entirely), and there was no
+      // way to find "Team overdue: ..." again from inside the app itself.
+      final dueRaw = t['dueDate'];
+      final due = dueRaw == null ? null : DateTime.tryParse(dueRaw.toString());
+      items.add(AppNotification(
+        id: 'escalation_$id',
+        kind: NotificationKind.teamOverdue,
+        title: 'Team overdue: $title',
+        body: '$assigneeName · 1 day overdue',
+        timestamp: due ?? now,
+        refId: id,
+        spaceName: spaceName.isNotEmpty ? spaceName : null,
+      ));
       if (isFirstRun) {
         stillEscalatedIds.add(id);
         continue;
@@ -320,9 +343,6 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // run on every platform regardless, so only the local re-post is
       // skipped here, not the loop itself.
       if (!Platform.isIOS) {
-        final title = (t['name'] ?? 'Untitled task').toString();
-        final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
-        final spaceName = (t['spaceName'] ?? '').toString();
         await NotificationService.instance.showTaskUpdateNotification(
           taskId: 'escalation_$id',
           title: 'Team overdue: $title',
@@ -355,6 +375,22 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     for (final t in approvals) {
       final id = (t['_id'] ?? '').toString();
       if (id.isEmpty) continue;
+      final title = (t['name'] ?? 'Untitled task').toString();
+      final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
+      final spaceName = (t['spaceName'] ?? '').toString();
+      // Added to the in-app feed unconditionally, every build -- same
+      // reasoning as the escalations block above, which this mirrors.
+      final requestedRaw = t['requestedAt'];
+      final requested = requestedRaw == null ? null : DateTime.tryParse(requestedRaw.toString());
+      items.add(AppNotification(
+        id: 'approval_$id',
+        kind: NotificationKind.approvalNeeded,
+        title: 'Approval needed: $title',
+        body: '$assigneeName marked this complete',
+        timestamp: requested ?? now,
+        refId: id,
+        spaceName: spaceName.isNotEmpty ? spaceName : null,
+      ));
       if (isFirstRunApprovals) {
         stillPendingIds.add(id);
         continue;
@@ -371,9 +407,6 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
       // push the moment this happens -- same reasoning as the isMine-
       // branch and team-escalations guards above.
       if (!Platform.isIOS) {
-        final title = (t['name'] ?? 'Untitled task').toString();
-        final assigneeName = (t['assigneeId']?['employeeName'] ?? 'Someone').toString();
-        final spaceName = (t['spaceName'] ?? '').toString();
         await NotificationService.instance.showTaskUpdateNotification(
           taskId: 'approval_$id',
           title: 'Approval needed: $title',

@@ -16,13 +16,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// succeeds a moment later. Auto-retrying here means the person doesn't
 /// have to notice and tap Retry by hand for something that was only ever
 /// going to need a second to resolve itself.
-Future<T> withTransientRetry<T>(Future<T> Function() action, {int maxAttempts = 3}) async {
+Future<T> withTransientRetry<T>(Future<T> Function() action, {int maxAttempts = 4}) async {
   for (var attempt = 1;; attempt++) {
     try {
       return await action();
     } catch (_) {
       if (attempt >= maxAttempts) rethrow;
-      await Future.delayed(Duration(milliseconds: 400 * attempt));
+      await Future.delayed(Duration(milliseconds: 600 * attempt));
     }
   }
 }

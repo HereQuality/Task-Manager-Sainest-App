@@ -27,6 +27,10 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
         return Icons.confirmation_number_outlined;
       case NotificationKind.taskAssigned:
         return Icons.assignment_outlined;
+      case NotificationKind.teamOverdue:
+        return Icons.groups_outlined;
+      case NotificationKind.approvalNeeded:
+        return Icons.task_alt_outlined;
     }
   }
 
@@ -40,6 +44,10 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
         return AppColors.indigo;
       case NotificationKind.taskAssigned:
         return AppColors.success;
+      case NotificationKind.teamOverdue:
+        return AppColors.danger;
+      case NotificationKind.approvalNeeded:
+        return AppColors.warning;
     }
   }
 
