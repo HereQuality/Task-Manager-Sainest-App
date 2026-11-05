@@ -1,11 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../core/api_client.dart';
-import '../core/task_update_tracker.dart' show scopedKey;
 import 'auth_provider.dart';
 
 /// Set from Dashboard's stat cards (Total tasks/On time completion/
@@ -39,25 +36,39 @@ final pendingHomeTabIndex = ValueNotifier<int?>(null);
 /// their own endpoints, just expressed via Riverpod's own keepAlive
 /// rather than a hand-rolled static cache, since this provider (unlike
 /// those two) is already Riverpod-managed.
+const _myTasksCacheKey = 'my_tasks_cache';
+
+/// Falls back to the last cached list (see cachedListFetch's own doc
+/// comment) instead of throwing when offline -- Dashboard's "Today's
+/// tasks", the Tasks tab's "My tasks", and the Calendar tab all read
+/// this same provider, so this one fix is what keeps all three showing
+/// the last-known task list (just not updating live) instead of each
+/// independently showing "Couldn't load this".
 final myTasksProvider =
     FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
   final link = ref.keepAlive();
   final timer = Timer(const Duration(seconds: 30), link.close);
   ref.onDispose(timer.cancel);
 
-  try {
-    final res = await ApiClient.instance.dio.get('/tasks/mine/all');
-    final data = res.data['data'] ?? res.data['tasks'] ?? [];
-    return List<Map<String, dynamic>>.from(data);
-  } on DioException catch (e) {
-    // 403 -- this account isn't authorized to list tasks this way (role/
-    // permission gate on the backend), not "no tasks exist". Treated the
-    // same as empty rather than surfacing a raw permissions error --
-    // notificationsFeedProvider watches this too, so an uncaught 403 here
-    // would otherwise take down the whole Notifications screen as well.
-    if (e.response?.statusCode == 403) return [];
-    rethrow;
-  }
+  final currentUserId = ref.watch(authProvider).user?.id;
+  return cachedListFetch(_myTasksCacheKey, currentUserId, () async {
+    try {
+      final res = await ApiClient.instance.dio.get('/tasks/mine/all');
+      final data = res.data['data'] ?? res.data['tasks'] ?? [];
+      return List<Map<String, dynamic>>.from(data);
+    } on DioException catch (e) {
+      // 403 -- this account isn't authorized to list tasks this way (role/
+      // permission gate on the backend), not "no tasks exist". Treated the
+      // same as empty rather than surfacing a raw permissions error --
+      // notificationsFeedProvider watches this too, so an uncaught 403 here
+      // would otherwise take down the whole Notifications screen as well.
+      // A real (non-transient) result like this one is cached and returned
+      // same as any other success, not treated as a failure to fall back
+      // from -- see cachedListFetch's own doc comment.
+      if (e.response?.statusCode == 403) return [];
+      rethrow;
+    }
+  });
 });
 
 const _dashboardStatsCacheKey = 'dashboard_stats_cache';
@@ -69,36 +80,19 @@ const _dashboardStatsCacheKey = 'dashboard_stats_cache';
 // this one account's own numbers, which is what the mobile Home
 // screen's ATS/OTC cards are meant to show (same personal scope as
 // myTasksProvider's "/tasks/mine/all" above).
-//
-// Every successful response is also mirrored into SharedPreferences
-// (scoped per-account via scopedKey, same cross-account reasoning as
-// task_update_tracker.dart's own keys), and a failed request falls back
-// to that cache instead of throwing -- without this, losing connection
-// turned the Home screen's whole stats section into "Stats unavailable
-// right now." even though every number in it was sitting right there a
-// moment ago. The numbers just stop updating live while offline, same
-// as everything else on this screen already does once its one-shot
-// fetch is done; they catch back up the next time this succeeds (pull-
-// to-refresh, or the next cold start) once the connection returns.
 final dashboardStatsProvider =
     FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
   final user = ref.watch(authProvider).user;
-  final prefs = await SharedPreferences.getInstance();
-  final cacheKey = scopedKey(_dashboardStatsCacheKey, user?.id);
-  try {
+  return cachedMapFetch(_dashboardStatsCacheKey, user?.id, () async {
     final res = await ApiClient.instance.dio.get(
       '/tasks/dashboard-stats',
       queryParameters: user != null ? {'assigneeIds': user.id} : null,
     );
-    final stats = Map<String, dynamic>.from(res.data['data'] ?? {});
-    await prefs.setString(cacheKey, jsonEncode(stats));
-    return stats;
-  } catch (e) {
-    final cached = prefs.getString(cacheKey);
-    if (cached == null) rethrow;
-    return Map<String, dynamic>.from(jsonDecode(cached) as Map);
-  }
+    return Map<String, dynamic>.from(res.data['data'] ?? {});
+  });
 });
+
+const _delayByPersonCacheKey = 'delay_by_person_cache';
 
 /// Every visible person's own average delay-days across their currently-
 /// overdue tasks, worst-first -- GET /api/v1/tasks/dashboard-stats/
@@ -110,9 +104,12 @@ final dashboardStatsProvider =
 /// "Average Delay Days" per-person list.
 final averageDelayDaysByPersonProvider =
     FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
-  final res = await ApiClient.instance.dio.get('/tasks/dashboard-stats/by-person');
-  final data = res.data['data'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  final currentUserId = ref.watch(authProvider).user?.id;
+  return cachedListFetch(_delayByPersonCacheKey, currentUserId, () async {
+    final res = await ApiClient.instance.dio.get('/tasks/dashboard-stats/by-person');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  });
 });
 
 Future<void> updateTaskStatus(String taskId, String status) async {
@@ -163,17 +160,22 @@ Future<void> updateTaskDetails(
 /// provider, since background_watcher_service.dart's isolate has no
 /// ProviderScope to watch one through -- see notifications_provider.dart
 /// and that file for the two places this gets called from.
+const _teamEscalationsCacheKey = 'team_escalations_cache';
+
 Future<List<Map<String, dynamic>>> fetchTeamOverdueEscalations() async {
-  try {
-    final res =
-        await ApiClient.instance.dio.get('/tasks/team/overdue-escalations');
-    final data = res.data['data'] ?? [];
-    return List<Map<String, dynamic>>.from(data);
-  } on DioException catch (e) {
-    // See myTasksProvider's own catch above -- same reasoning.
-    if (e.response?.statusCode == 403) return [];
-    rethrow;
-  }
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+  return cachedListFetch(_teamEscalationsCacheKey, currentUserId, () async {
+    try {
+      final res =
+          await ApiClient.instance.dio.get('/tasks/team/overdue-escalations');
+      final data = res.data['data'] ?? [];
+      return List<Map<String, dynamic>>.from(data);
+    } on DioException catch (e) {
+      // See myTasksProvider's own catch above -- same reasoning.
+      if (e.response?.statusCode == 403) return [];
+      rethrow;
+    }
+  });
 }
 
 /// A delegator's own pending "please approve this completion" requests --
@@ -182,16 +184,21 @@ Future<List<Map<String, dynamic>>> fetchTeamOverdueEscalations() async {
 /// isn't its assignee) would otherwise never see this update on their
 /// phone -- same "plain function, not a provider" reasoning as
 /// fetchTeamOverdueEscalations.
+const _pendingApprovalsCacheKey = 'pending_approvals_cache';
+
 Future<List<Map<String, dynamic>>> fetchPendingApprovals() async {
-  try {
-    final res = await ApiClient.instance.dio.get('/tasks/pending-approvals');
-    final data = res.data['data'] ?? [];
-    return List<Map<String, dynamic>>.from(data);
-  } on DioException catch (e) {
-    // See myTasksProvider's own catch above -- same reasoning.
-    if (e.response?.statusCode == 403) return [];
-    rethrow;
-  }
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+  return cachedListFetch(_pendingApprovalsCacheKey, currentUserId, () async {
+    try {
+      final res = await ApiClient.instance.dio.get('/tasks/pending-approvals');
+      final data = res.data['data'] ?? [];
+      return List<Map<String, dynamic>>.from(data);
+    } on DioException catch (e) {
+      // See myTasksProvider's own catch above -- same reasoning.
+      if (e.response?.statusCode == 403) return [];
+      rethrow;
+    }
+  });
 }
 
 /// Riverpod wrapper around fetchPendingApprovals above, for the Tasks
@@ -228,16 +235,21 @@ Future<void> rejectTaskCompletion(String taskId, {String? reason}) async {
 /// /api/v1/tasks/my-submitted-approvals -- same "Awaiting Approval" name
 /// the web app's own button uses (MySubmittedApprovalsModal.jsx), kept
 /// identical here so the two apps talk about this the same way.
+const _mySubmittedApprovalsCacheKey = 'my_submitted_approvals_cache';
+
 Future<List<Map<String, dynamic>>> fetchMySubmittedApprovals() async {
-  try {
-    final res = await ApiClient.instance.dio.get('/tasks/my-submitted-approvals');
-    final data = res.data['data'] ?? [];
-    return List<Map<String, dynamic>>.from(data);
-  } on DioException catch (e) {
-    // See myTasksProvider's own catch above -- same reasoning.
-    if (e.response?.statusCode == 403) return [];
-    rethrow;
-  }
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+  return cachedListFetch(_mySubmittedApprovalsCacheKey, currentUserId, () async {
+    try {
+      final res = await ApiClient.instance.dio.get('/tasks/my-submitted-approvals');
+      final data = res.data['data'] ?? [];
+      return List<Map<String, dynamic>>.from(data);
+    } on DioException catch (e) {
+      // See myTasksProvider's own catch above -- same reasoning.
+      if (e.response?.statusCode == 403) return [];
+      rethrow;
+    }
+  });
 }
 
 /// Riverpod wrapper around fetchMySubmittedApprovals above, for the
@@ -263,16 +275,21 @@ final mySubmittedApprovalsProvider =
 /// itself for display, matching the web app's PendingApprovalsModal.jsx
 /// (usePendingApprovals), which does the same two-calls-merged-in-the-
 /// component pattern rather than one combined endpoint.
+const _lockOverrideRequestsCacheKey = 'lock_override_requests_cache';
+
 Future<List<Map<String, dynamic>>> fetchLockOverrideRequests() async {
-  try {
-    final res = await ApiClient.instance.dio.get('/tasks/lock-override-requests');
-    final data = res.data['data'] ?? [];
-    return List<Map<String, dynamic>>.from(data);
-  } on DioException catch (e) {
-    // See myTasksProvider's own catch above -- same reasoning.
-    if (e.response?.statusCode == 403) return [];
-    rethrow;
-  }
+  final currentUserId = await ApiClient.instance.readCurrentUserId();
+  return cachedListFetch(_lockOverrideRequestsCacheKey, currentUserId, () async {
+    try {
+      final res = await ApiClient.instance.dio.get('/tasks/lock-override-requests');
+      final data = res.data['data'] ?? [];
+      return List<Map<String, dynamic>>.from(data);
+    } on DioException catch (e) {
+      // See myTasksProvider's own catch above -- same reasoning.
+      if (e.response?.statusCode == 403) return [];
+      rethrow;
+    }
+  });
 }
 
 final lockOverrideRequestsProvider =
@@ -323,13 +340,18 @@ Future<void> requestLockOverride(
   });
 }
 
+const _subtasksCacheKeyPrefix = 'subtasks_cache_';
+
 /// A task's subtasks -- GET /api/v1/tasks/:id/subtasks (same endpoint
-/// TaskDetailModal.jsx's Subtasks panel uses).
+/// TaskDetailModal.jsx's Subtasks panel uses). Cached per taskId and
+/// falls back to it offline, same reasoning as taskDetailProvider above.
 final subtasksProvider = FutureProvider.autoDispose
     .family<List<Map<String, dynamic>>, String>((ref, taskId) async {
-  final res = await ApiClient.instance.dio.get('/tasks/$taskId/subtasks');
-  final data = res.data['data'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  return cachedListFetch('$_subtasksCacheKeyPrefix$taskId', null, () async {
+    final res = await ApiClient.instance.dio.get('/tasks/$taskId/subtasks');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  });
 });
 
 /// Creates a subtask under a task -- POST /api/v1/tasks/:id/subtasks.
@@ -415,15 +437,26 @@ Future<void> deleteTaskComment(String taskId, String commentId) async {
   await ApiClient.instance.dio.delete('/tasks/$taskId/comments/$commentId');
 }
 
+const _taskDetailCacheKeyPrefix = 'task_detail_cache_';
+
 /// A single task, full detail -- GET /api/v1/tasks/:id (same endpoint
 /// TaskDetailModal.jsx uses on the web). Backs the Task Detail screen
 /// opened by tapping a task card anywhere (Tasks tab, Home's "Due soon",
 /// or a day's tasks on the Calendar tab).
+///
+/// Cached per taskId and falls back to that cache offline (see
+/// cachedMapFetch's own doc comment in api_client.dart) -- reopening a
+/// task this device already loaded before still shows it (just not
+/// live) instead of "Could not load this task." A task never opened on
+/// this device before still has nothing to fall back to, same as any
+/// other first-ever fetch.
 final taskDetailProvider = FutureProvider.autoDispose
     .family<Map<String, dynamic>, String>((ref, taskId) async {
-  return withTransientRetry(() async {
-    final res = await ApiClient.instance.dio.get('/tasks/$taskId');
-    return Map<String, dynamic>.from(res.data['data'] ?? {});
+  return cachedMapFetch('$_taskDetailCacheKeyPrefix$taskId', null, () {
+    return withTransientRetry(() async {
+      final res = await ApiClient.instance.dio.get('/tasks/$taskId');
+      return Map<String, dynamic>.from(res.data['data'] ?? {});
+    });
   });
 });
 

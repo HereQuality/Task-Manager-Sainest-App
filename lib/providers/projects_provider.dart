@@ -21,13 +21,17 @@ import '../core/api_client.dart';
 /// this down the instant Add Task closed, right when the sheet builds.
 /// Invalidated on logout/session expiry in auth_provider.dart, same as
 /// the other two.
+const _projectsCacheKey = 'projects_cache';
+
 final projectsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
-  return withTransientRetry(() async {
-    final res = await ApiClient.instance.dio.get('/projects');
-    final data = res.data['data'] ?? [];
-    final projects = List<Map<String, dynamic>>.from(data);
-    final active = projects.where((p) => p['isActive'] != false).toList();
-    active.sort((a, b) => (a['projectName'] ?? '').toString().compareTo((b['projectName'] ?? '').toString()));
-    return active;
+  return cachedListFetch(_projectsCacheKey, null, () {
+    return withTransientRetry(() async {
+      final res = await ApiClient.instance.dio.get('/projects');
+      final data = res.data['data'] ?? [];
+      final projects = List<Map<String, dynamic>>.from(data);
+      final active = projects.where((p) => p['isActive'] != false).toList();
+      active.sort((a, b) => (a['projectName'] ?? '').toString().compareTo((b['projectName'] ?? '').toString()));
+      return active;
+    });
   });
 });

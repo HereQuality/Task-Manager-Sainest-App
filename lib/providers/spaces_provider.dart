@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/api_client.dart';
+import 'auth_provider.dart';
 
 /// Spaces the current user belongs to -- GET /api/v1/spaces (same
 /// endpoint the web app's sidebar/Spaces page uses). Powers the Space
@@ -23,13 +24,22 @@ import '../core/api_client.dart';
 /// logout()/_onSessionExpired both explicitly invalidate it, so a
 /// different account logging in next never inherits a previous
 /// account's cached list.
+///
+/// Falls back to the last cached list if even withTransientRetry's
+/// retries all fail (offline, not just a transient hiccup) -- see
+/// cachedListFetch's own doc comment in api_client.dart.
 final spacesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
-  return withTransientRetry(() async {
-    final res = await ApiClient.instance.dio.get('/spaces');
-    final data = res.data['data'] ?? [];
-    return List<Map<String, dynamic>>.from(data);
+  final currentUserId = ref.watch(authProvider).user?.id;
+  return cachedListFetch(_spacesCacheKey, currentUserId, () {
+    return withTransientRetry(() async {
+      final res = await ApiClient.instance.dio.get('/spaces');
+      final data = res.data['data'] ?? [];
+      return List<Map<String, dynamic>>.from(data);
+    });
   });
 });
+
+const _spacesCacheKey = 'spaces_cache';
 
 // Which Space a given employee belongs to is the same fact no matter
 // which account is asking -- unlike task_update_tracker.dart's

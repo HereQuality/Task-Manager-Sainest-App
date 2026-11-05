@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'task_update_tracker.dart' show scopedKey;
 
 /// Retries a failing fetch up to [maxAttempts] times, with a short,
 /// increasing delay between tries, before letting the final failure
@@ -24,6 +26,61 @@ Future<T> withTransientRetry<T>(Future<T> Function() action, {int maxAttempts = 
       if (attempt >= maxAttempts) rethrow;
       await Future.delayed(Duration(milliseconds: 600 * attempt));
     }
+  }
+}
+
+/// Shared "show the last thing we loaded instead of an error" cache,
+/// backing most of this app's list/map screens (Dashboard, Tasks,
+/// Calendar, Notifications, Tickets, Pending/Awaiting Approvals -- see
+/// each provider's own call site). Every successful [fetch] is mirrored
+/// into SharedPreferences under [cacheKey] (scoped per-account via
+/// scopedKey, same cross-account reasoning as task_update_tracker.dart's
+/// own keys), and a failing one falls back to whatever was last cached
+/// instead of throwing -- without this, losing connection turned every
+/// one of those screens into a bare "Couldn't load this" error even
+/// though the data was sitting right there a moment ago. The data just
+/// stops updating live while offline; it catches back up the next time
+/// [fetch] succeeds (pull-to-refresh, or the next cold start) once the
+/// connection returns. Only takes over when [fetch] itself throws -- a
+/// deliberate empty/403-as-empty result from the caller is cached and
+/// returned like any other successful value, not treated as a failure.
+Future<Map<String, dynamic>> cachedMapFetch(
+  String cacheKey,
+  String? currentUserId,
+  Future<Map<String, dynamic>> Function() fetch,
+) async {
+  final prefs = await SharedPreferences.getInstance();
+  final key = scopedKey(cacheKey, currentUserId);
+  try {
+    final result = await fetch();
+    await prefs.setString(key, jsonEncode(result));
+    return result;
+  } catch (e) {
+    final cached = prefs.getString(key);
+    if (cached == null) rethrow;
+    return Map<String, dynamic>.from(jsonDecode(cached) as Map);
+  }
+}
+
+/// List counterpart to cachedMapFetch above -- same caching/fallback
+/// behavior, for the far more common `List<Map<String, dynamic>>` shape
+/// (task lists, ticket lists, approval lists, etc).
+Future<List<Map<String, dynamic>>> cachedListFetch(
+  String cacheKey,
+  String? currentUserId,
+  Future<List<Map<String, dynamic>>> Function() fetch,
+) async {
+  final prefs = await SharedPreferences.getInstance();
+  final key = scopedKey(cacheKey, currentUserId);
+  try {
+    final result = await fetch();
+    await prefs.setString(key, jsonEncode(result));
+    return result;
+  } catch (e) {
+    final cached = prefs.getString(key);
+    if (cached == null) rethrow;
+    final decoded = jsonDecode(cached) as List;
+    return decoded.map((e) => Map<String, dynamic>.from(e as Map)).toList();
   }
 }
 

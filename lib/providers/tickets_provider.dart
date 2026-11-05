@@ -1,10 +1,13 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api_client.dart';
+import 'auth_provider.dart';
 
 const kTicketPlatforms = ['Web', 'App'];
 const kTicketPriorities = ['Urgent', 'High', 'Normal', 'Low'];
 const kTicketStatuses = ['Pending', 'In Progress', 'Confirmation', 'Closed'];
+
+const _ticketsCacheKey = 'tickets_cache';
 
 /// Every ticket visible to the logged-in person -- GET /api/v1/tickets
 /// (same endpoint Support.jsx uses). The server itself decides the scope
@@ -13,26 +16,41 @@ const kTicketStatuses = ['Pending', 'In Progress', 'Confirmation', 'Closed'];
 /// ticket.controller.js), so a ticket showing up here that this person
 /// didn't raise themselves is the client-side signal that they hold the
 /// Support desk's Full Access role -- see _isOwner in tickets_screen.dart.
+///
+/// Falls back to the last cached list offline instead of throwing -- see
+/// cachedListFetch's own doc comment in api_client.dart. notificationsFeedProvider
+/// also reads this (for ticket-update items), so this one fix keeps both
+/// the Tickets screen and the Notifications feed resilient to it.
 final ticketsProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
-  try {
-    final res = await ApiClient.instance.dio.get('/tickets');
-    final data = res.data['data'] ?? res.data['tickets'] ?? [];
-    return List<Map<String, dynamic>>.from(data);
-  } on DioException catch (e) {
-    // 403 -- this account isn't authorized to list tickets (role/permission
-    // gate on the backend, not "no tickets exist"). Treated the same as
-    // empty rather than surfacing a raw permissions error, since there's
-    // nothing actionable for the person to do about it from here.
-    if (e.response?.statusCode == 403) return [];
-    rethrow;
-  }
+  final currentUserId = ref.watch(authProvider).user?.id;
+  return cachedListFetch(_ticketsCacheKey, currentUserId, () async {
+    try {
+      final res = await ApiClient.instance.dio.get('/tickets');
+      final data = res.data['data'] ?? res.data['tickets'] ?? [];
+      return List<Map<String, dynamic>>.from(data);
+    } on DioException catch (e) {
+      // 403 -- this account isn't authorized to list tickets (role/permission
+      // gate on the backend, not "no tickets exist"). Treated the same as
+      // empty rather than surfacing a raw permissions error, since there's
+      // nothing actionable for the person to do about it from here.
+      if (e.response?.statusCode == 403) return [];
+      rethrow;
+    }
+  });
 });
+
+const _ticketDetailCacheKeyPrefix = 'ticket_detail_cache_';
 
 /// A single ticket, full detail (including its comment thread) -- GET
 /// /api/v1/tickets/:id (same endpoint TicketDetailModal uses on the web).
+///
+/// Cached per ticket id and falls back to it offline -- see taskDetailProvider's
+/// identical reasoning in tasks_provider.dart.
 final ticketDetailProvider = FutureProvider.autoDispose.family<Map<String, dynamic>, String>((ref, id) async {
-  final res = await ApiClient.instance.dio.get('/tickets/$id');
-  return Map<String, dynamic>.from(res.data['data'] ?? {});
+  return cachedMapFetch('$_ticketDetailCacheKeyPrefix$id', null, () async {
+    final res = await ApiClient.instance.dio.get('/tickets/$id');
+    return Map<String, dynamic>.from(res.data['data'] ?? {});
+  });
 });
 
 /// POST /api/v1/tickets -- matches NewTicketModal on the web: subject,
