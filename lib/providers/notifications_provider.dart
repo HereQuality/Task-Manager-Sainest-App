@@ -22,6 +22,11 @@ const _alertedApprovalIdsKey = 'approval_alerted_task_ids';
 // its doc comment for why a snoozed task must be excluded from the
 // "already alerted" re-fire check below until its snooze window passes.
 const _snoozedUntilKey = 'overdue_snoozed_until_task_ids';
+// {AppNotification.id: epoch-ms this device first showed it} -- see the
+// feed-sort doc comment at the bottom of this file for why the feed is
+// ordered by this instead of by each item's own due/created/updated
+// date.
+const _firstSeenAtKey = 'notification_first_seen_at';
 
 /// Which feed items the person has already looked at, by AppNotification.id
 /// -- what the Home bell's badge count subtracts out. This is a real
@@ -829,7 +834,52 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     }
   }
 
-  items.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+  // Ordered by when THIS DEVICE first showed each item, not by any date
+  // embedded in the task/ticket itself (due date, created/updated time) --
+  // same model a WhatsApp chat list uses: whatever just arrived jumps to
+  // the top, and everything else holds its place until something newer
+  // comes in, rather than the whole list reshuffling around on every
+  // rebuild by each item's own unrelated timestamp. Sorting by the raw
+  // timestamp instead (the previous approach) put a task due 40 hours
+  // from now above an overdue alert from 10 minutes ago, and a task
+  // reassigned to someone hours ago above a ticket updated moments ago --
+  // technically accurate per-item, but not what anyone scanning a
+  // notification feed expects "recent" to mean.
+  final seenAtPrefs = await SharedPreferences.getInstance();
+  final seenAtKey = scopedKey(_firstSeenAtKey, currentUserId);
+  Map<String, dynamic> firstSeenAt = {};
+  final rawFirstSeenAt = seenAtPrefs.getString(seenAtKey);
+  if (rawFirstSeenAt != null) {
+    try {
+      firstSeenAt = jsonDecode(rawFirstSeenAt) as Map<String, dynamic>;
+    } catch (_) {}
+  }
+  final nowMs = now.millisecondsSinceEpoch;
+  var firstSeenAtChanged = false;
+  for (final item in items) {
+    if (!firstSeenAt.containsKey(item.id)) {
+      firstSeenAt[item.id] = nowMs;
+      firstSeenAtChanged = true;
+    }
+  }
+  // Prune ids no longer in this build (task completed, ticket aged out of
+  // its own 3-day window, etc.) so this map doesn't grow forever.
+  final liveIds = items.map((n) => n.id).toSet();
+  final staleKeys = firstSeenAt.keys.where((k) => !liveIds.contains(k)).toList();
+  if (staleKeys.isNotEmpty) {
+    for (final k in staleKeys) {
+      firstSeenAt.remove(k);
+    }
+    firstSeenAtChanged = true;
+  }
+  if (firstSeenAtChanged) {
+    await seenAtPrefs.setString(seenAtKey, jsonEncode(firstSeenAt));
+  }
+  items.sort((a, b) {
+    final aMs = firstSeenAt[a.id] as int? ?? a.timestamp.millisecondsSinceEpoch;
+    final bMs = firstSeenAt[b.id] as int? ?? b.timestamp.millisecondsSinceEpoch;
+    return bMs.compareTo(aMs);
+  });
   return items;
 });
 
