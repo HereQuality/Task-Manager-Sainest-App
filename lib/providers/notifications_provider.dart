@@ -570,7 +570,17 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
             kind: NotificationKind.taskDueSoon,
             title: 'Due soon: $title',
             body: 'Due ${_relative(due, now)}',
-            timestamp: due,
+            // `now`, not `due` -- `due` is still baked into the body text
+            // above ("Due in 13h"), but using it here too made this
+            // notification's FEED POSITION jump to wherever its future due
+            // date happened to land, often ranking it above something that
+            // genuinely just happened (a fresh Overdue, a ticket updated
+            // minutes ago). The feed is sorted most-recent-first like an
+            // actual notification tray (see the sort at the bottom of this
+            // function) -- what belongs in that ordering is when the
+            // person was actually told about this, not an unrelated future
+            // date on the task itself.
+            timestamp: now,
             refId: id,
             spaceName: spaceName.isNotEmpty ? spaceName : null,
           ));
