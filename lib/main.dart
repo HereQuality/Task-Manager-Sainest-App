@@ -97,7 +97,13 @@ Future<void> main() async {
       // app update.
       if (data['type'] == 'task_update') {
         final taskId = data['taskId'] as String?;
-        if (taskId != null) pendingTaskOpenNotifier.value = taskId;
+        // Same escalation_<id>/approval_<id> stripping as
+        // notification_service.dart's _handleNotificationTap -- this is
+        // the cold-start equivalent of that same tap (app was fully
+        // closed), so it needs the same fix for the same reason.
+        if (taskId != null) {
+          pendingTaskOpenNotifier.value = taskId.replaceFirst(RegExp(r'^(escalation|approval)_'), '');
+        }
       } else {
         pendingAlarmNotifier.value = data;
       }

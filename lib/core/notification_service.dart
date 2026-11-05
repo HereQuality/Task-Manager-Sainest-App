@@ -1231,7 +1231,23 @@ Future<void> _handleNotificationTap(NotificationResponse response) async {
     // so response.actionId is always null here -- straight to opening the
     // task, same "seed the notifier, router.dart redirects" pattern the
     // alarm case below uses for its own plain tap.
-    pendingTaskOpenNotifier.value = taskId;
+    //
+    // escalation_<id>/approval_<id> (see notifications_provider.dart's two
+    // showTaskUpdateNotification calls for "Team overdue"/"Approval
+    // needed") are notification-IDENTITY-only prefixes -- showTaskUpdateNotification
+    // hashes 'taskupdate_$taskId' for the Android notification id, and the
+    // prefix is what keeps an escalation/approval notification about a
+    // task visually distinct from a plain "task updated" one about the
+    // SAME task, rather than Android treating them as the same
+    // notification. The actual Task Detail route (and its GET /tasks/:id
+    // call) needs the real, bare task id -- stripped here before
+    // navigating. Without this, tapping "Team overdue: ..." sent the app
+    // to /home/tasks/escalation_<id>, which can never resolve to a real
+    // task server-side -- confirmed live as exactly "a teammate's task
+    // opens fine from the Tasks list, but fails from this notification
+    // specifically."
+    final realTaskId = taskId.replaceFirst(RegExp(r'^(escalation|approval)_'), '');
+    pendingTaskOpenNotifier.value = realTaskId;
     return;
   }
 
