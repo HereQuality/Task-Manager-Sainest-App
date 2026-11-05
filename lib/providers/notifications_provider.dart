@@ -445,12 +445,22 @@ final notificationsFeedProvider = FutureProvider.autoDispose<List<AppNotificatio
     final createdRaw = t['createdAt'];
     final created = createdRaw == null ? null : DateTime.tryParse(createdRaw.toString());
     if (created != null && now.difference(created).inHours <= 48) {
+      // Sort position uses updatedAt, not createdAt -- a task created
+      // hours ago but only just now assigned to you (e.g. "changed
+      // assignee from Unassigned to Dhruv Shah") kept this item pinned to
+      // its original creation time, burying a just-happened assignment in
+      // the middle of a list of older Due soon items instead of near the
+      // top. createdAt is still what gates the 48h window above (keeps
+      // this stable/predictable across rebuilds, see this block's own
+      // doc comment); only which timestamp SORTS it changes here.
+      final updatedRaw = t['updatedAt'];
+      final updated = updatedRaw == null ? null : DateTime.tryParse(updatedRaw.toString());
       items.add(AppNotification(
         id: 'assigned_$id',
         kind: NotificationKind.taskAssigned,
         title: 'New task: $title',
         body: spaceName.isNotEmpty ? 'Assigned to you · $spaceName' : 'Assigned to you',
-        timestamp: created,
+        timestamp: updated ?? created,
         refId: id,
         spaceName: spaceName.isNotEmpty ? spaceName : null,
       ));
