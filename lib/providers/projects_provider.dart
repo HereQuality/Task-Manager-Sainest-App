@@ -12,7 +12,16 @@ import '../core/api_client.dart';
 /// assignableEmployeesProvider already documents for "Assign to": the
 /// Add Task sheet's Project dropdown is meant to offer every active
 /// Project, not just ones belonging to whichever Space is picked.
-final projectsProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
+///
+/// Deliberately NOT .autoDispose -- see spacesProvider's identical doc
+/// comment in spaces_provider.dart for why. Warmed by home_shell.dart's
+/// initState (right when the app opens, same as Spaces/Employees) so
+/// it's already sitting ready by the time Add Task opens, instead of
+/// starting a fresh fetch from scratch every time -- .autoDispose tore
+/// this down the instant Add Task closed, right when the sheet builds.
+/// Invalidated on logout/session expiry in auth_provider.dart, same as
+/// the other two.
+final projectsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   return withTransientRetry(() async {
     final res = await ApiClient.instance.dio.get('/projects');
     final data = res.data['data'] ?? [];

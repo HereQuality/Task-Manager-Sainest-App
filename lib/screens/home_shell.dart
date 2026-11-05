@@ -4,6 +4,9 @@ import 'dashboard_screen.dart';
 import 'tasks_screen.dart';
 import 'calendar_screen.dart';
 import 'profile_screen.dart';
+import '../providers/employees_provider.dart';
+import '../providers/projects_provider.dart';
+import '../providers/spaces_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../widgets/add_task_sheet.dart';
 
@@ -35,6 +38,22 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   void initState() {
     super.initState();
     pendingHomeTabIndex.addListener(_consumePendingTabIndex);
+    // Spaces/Employees/Projects power the Add Task sheet's three pickers
+    // and are all deliberately NOT .autoDispose (see spacesProvider's own
+    // doc comment), kept alive for the whole session -- but that only
+    // means a fetch isn't torn down once started; something still has to
+    // actually START it. Spaces/Employees previously relied on
+    // incidentally being watched by tasks_screen.dart, so Add Task only
+    // opened instantly if the Tasks tab happened to have been visited
+    // first -- opening it right from Home (or Calendar, or Profile) still
+    // triggered a fresh fetch at that exact moment, same as Projects
+    // (actually .autoDispose until now) always did. Warming all three
+    // here, once, right when this shell first mounts (effectively "the
+    // app opened"), means Add Task has real data ready the instant it's
+    // tapped from anywhere, not just from Tasks.
+    ref.read(spacesProvider);
+    ref.read(assignableEmployeesProvider);
+    ref.read(projectsProvider);
   }
 
   @override

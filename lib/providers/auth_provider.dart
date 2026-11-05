@@ -8,6 +8,7 @@ import '../core/notification_service.dart';
 import '../core/push_service.dart';
 import '../models/user.dart';
 import 'employees_provider.dart';
+import 'projects_provider.dart' show projectsProvider;
 import 'spaces_provider.dart' show spacesProvider;
 
 enum AuthStatus { unknown, authenticated, unauthenticated }
@@ -73,6 +74,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
     // explicit Log out tap.
     _ref.invalidate(spacesProvider);
     _ref.invalidate(assignableEmployeesProvider);
+    _ref.invalidate(projectsProvider);
     state = const AuthState(
       status: AuthStatus.unauthenticated,
       error: 'Your session has expired. Please log in again.',
@@ -287,6 +289,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
     // to invalidate them.
     _ref.invalidate(spacesProvider);
     _ref.invalidate(assignableEmployeesProvider);
+    _ref.invalidate(projectsProvider);
     state = const AuthState(status: AuthStatus.unauthenticated);
   }
 }

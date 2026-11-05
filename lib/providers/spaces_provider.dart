@@ -9,13 +9,18 @@ import '../core/api_client.dart';
 /// (see CLAUDE.md's State management section) -- the "+" tab that opens
 /// Add Task is reachable from every screen in home_shell.dart, not just
 /// tasks_screen.dart, so an autoDispose version would tear down and
-/// re-fetch from scratch every single time someone opens Add Task from
-/// anywhere but the Tasks tab (tasks_screen.dart's own `ref.watch
-/// (spacesProvider)` is what keeps this warm while that screen happens to
-/// be the one mounted). Safe to keep alive for the whole session because
-/// auth_provider.dart's logout()/_onSessionExpired both explicitly
-/// invalidate it, so a different account logging in next never inherits
-/// a previous account's cached list.
+/// re-fetch from scratch every single time someone opens Add Task.
+/// Warmed by home_shell.dart's initState the moment the app opens
+/// (`ref.read`, not `.watch` -- this just needs to START the fetch, not
+/// rebuild the shell on every data change), so it's already sitting
+/// ready regardless of which tab Add Task gets opened from, not only
+/// after the Tasks tab happens to have been visited first (that tab's
+/// own `ref.watch(spacesProvider)` now just keeps it watched while
+/// mounted, same as before, rather than being what starts it). Safe to
+/// keep alive for the whole session because auth_provider.dart's
+/// logout()/_onSessionExpired both explicitly invalidate it, so a
+/// different account logging in next never inherits a previous
+/// account's cached list.
 final spacesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   return withTransientRetry(() async {
     final res = await ApiClient.instance.dio.get('/spaces');
