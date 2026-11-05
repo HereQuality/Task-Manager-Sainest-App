@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/api_client.dart';
 
 /// Spaces the current user belongs to -- GET /api/v1/spaces (same
@@ -29,6 +31,13 @@ final spacesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   });
 });
 
+// Which Space a given employee belongs to is the same fact no matter
+// which account is asking -- unlike task_update_tracker.dart's
+// scopedKey() keys, these two caches are deliberately NOT per-account,
+// just per-employeeId.
+const _employeeSpaceCachePrefix = 'employee_space_cache_';
+const _employeeSpacesAllCachePrefix = 'employee_spaces_all_cache_';
+
 /// Which (active) Space a given employee currently belongs to -- GET
 /// /api/v1/spaces/for-employee/:employeeId. Deliberately open to any
 /// authenticated user (see space.controller.js#getSpaceForEmployee's own
@@ -43,10 +52,28 @@ final spacesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
 /// correctly relocated server-side (see tasks_provider.dart's
 /// assignTaskAndMoveSpace) -- this fixes the display, not the placement,
 /// which was already correct.
+///
+/// Every successful lookup is also mirrored into SharedPreferences, and a
+/// failed one (no connection) falls back to whatever was last cached for
+/// this exact employeeId -- without this, picking an assignee while
+/// offline always left the Space field unset, even for someone this
+/// device had already looked up (and cached) minutes earlier, since this
+/// is a plain network call with nothing else backing it.
 Future<Map<String, dynamic>?> fetchEmployeeSpace(String employeeId) async {
-  final res = await ApiClient.instance.dio.get('/spaces/for-employee/$employeeId');
-  final data = res.data['data'];
-  return data is Map ? Map<String, dynamic>.from(data) : null;
+  final prefs = await SharedPreferences.getInstance();
+  final cacheKey = '$_employeeSpaceCachePrefix$employeeId';
+  try {
+    final res = await ApiClient.instance.dio.get('/spaces/for-employee/$employeeId');
+    final data = res.data['data'];
+    final space = data is Map ? Map<String, dynamic>.from(data) : null;
+    if (space != null) {
+      await prefs.setString(cacheKey, jsonEncode(space));
+    }
+    return space;
+  } catch (_) {
+    final cached = prefs.getString(cacheKey);
+    return cached == null ? null : Map<String, dynamic>.from(jsonDecode(cached) as Map);
+  }
 }
 
 /// EVERY (active) Space a given employee belongs to -- GET /api/v1/spaces/
@@ -59,10 +86,25 @@ Future<Map<String, dynamic>?> fetchEmployeeSpace(String employeeId) async {
 /// showAddTaskSheet for where this drives that expansion, and
 /// task.controller.js#updateTask's targetSpaceId param for how a specific
 /// one of these is then actually used when creating each copy.
+///
+/// Cached/falls back offline exactly like fetchEmployeeSpace above, same
+/// reasoning -- this also feeds showAddTaskSheet's own per-target Space
+/// expansion, not just the on-screen "who's going to which Team" preview.
 Future<List<Map<String, dynamic>>> fetchAllEmployeeSpaces(String employeeId) async {
-  final res = await ApiClient.instance.dio.get('/spaces/for-employee/$employeeId/all');
-  final data = res.data['data'];
-  return data is List ? List<Map<String, dynamic>>.from(data) : [];
+  final prefs = await SharedPreferences.getInstance();
+  final cacheKey = '$_employeeSpacesAllCachePrefix$employeeId';
+  try {
+    final res = await ApiClient.instance.dio.get('/spaces/for-employee/$employeeId/all');
+    final data = res.data['data'];
+    final list = data is List ? List<Map<String, dynamic>>.from(data) : <Map<String, dynamic>>[];
+    await prefs.setString(cacheKey, jsonEncode(list));
+    return list;
+  } catch (_) {
+    final cached = prefs.getString(cacheKey);
+    if (cached == null) return [];
+    return List<Map<String, dynamic>>.from(
+        (jsonDecode(cached) as List).map((e) => Map<String, dynamic>.from(e as Map)));
+  }
 }
 
 Set<String>? _cachedVisibleSpaceIds;

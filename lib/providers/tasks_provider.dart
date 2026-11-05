@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/api_client.dart';
+import '../core/task_update_tracker.dart' show scopedKey;
 import 'auth_provider.dart';
 
 /// Set from Dashboard's stat cards (Total tasks/On time completion/
@@ -57,6 +60,8 @@ final myTasksProvider =
   }
 });
 
+const _dashboardStatsCacheKey = 'dashboard_stats_cache';
+
 // Scoped explicitly to the logged-in user's own id -- sending no
 // assigneeIds at all makes the backend default to "me + every
 // subordinate" (or literally everyone, for a SuperAdmin -- see
@@ -64,14 +69,35 @@ final myTasksProvider =
 // this one account's own numbers, which is what the mobile Home
 // screen's ATS/OTC cards are meant to show (same personal scope as
 // myTasksProvider's "/tasks/mine/all" above).
+//
+// Every successful response is also mirrored into SharedPreferences
+// (scoped per-account via scopedKey, same cross-account reasoning as
+// task_update_tracker.dart's own keys), and a failed request falls back
+// to that cache instead of throwing -- without this, losing connection
+// turned the Home screen's whole stats section into "Stats unavailable
+// right now." even though every number in it was sitting right there a
+// moment ago. The numbers just stop updating live while offline, same
+// as everything else on this screen already does once its one-shot
+// fetch is done; they catch back up the next time this succeeds (pull-
+// to-refresh, or the next cold start) once the connection returns.
 final dashboardStatsProvider =
     FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
   final user = ref.watch(authProvider).user;
-  final res = await ApiClient.instance.dio.get(
-    '/tasks/dashboard-stats',
-    queryParameters: user != null ? {'assigneeIds': user.id} : null,
-  );
-  return Map<String, dynamic>.from(res.data['data'] ?? {});
+  final prefs = await SharedPreferences.getInstance();
+  final cacheKey = scopedKey(_dashboardStatsCacheKey, user?.id);
+  try {
+    final res = await ApiClient.instance.dio.get(
+      '/tasks/dashboard-stats',
+      queryParameters: user != null ? {'assigneeIds': user.id} : null,
+    );
+    final stats = Map<String, dynamic>.from(res.data['data'] ?? {});
+    await prefs.setString(cacheKey, jsonEncode(stats));
+    return stats;
+  } catch (e) {
+    final cached = prefs.getString(cacheKey);
+    if (cached == null) rethrow;
+    return Map<String, dynamic>.from(jsonDecode(cached) as Map);
+  }
 });
 
 /// Every visible person's own average delay-days across their currently-
