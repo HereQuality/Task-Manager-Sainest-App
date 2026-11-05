@@ -13,10 +13,12 @@ import '../core/api_client.dart';
 /// Add Task sheet's Project dropdown is meant to offer every active
 /// Project, not just ones belonging to whichever Space is picked.
 final projectsProvider = FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
-  final res = await ApiClient.instance.dio.get('/projects');
-  final data = res.data['data'] ?? [];
-  final projects = List<Map<String, dynamic>>.from(data);
-  final active = projects.where((p) => p['isActive'] != false).toList();
-  active.sort((a, b) => (a['projectName'] ?? '').toString().compareTo((b['projectName'] ?? '').toString()));
-  return active;
+  return withTransientRetry(() async {
+    final res = await ApiClient.instance.dio.get('/projects');
+    final data = res.data['data'] ?? [];
+    final projects = List<Map<String, dynamic>>.from(data);
+    final active = projects.where((p) => p['isActive'] != false).toList();
+    active.sort((a, b) => (a['projectName'] ?? '').toString().compareTo((b['projectName'] ?? '').toString()));
+    return active;
+  });
 });

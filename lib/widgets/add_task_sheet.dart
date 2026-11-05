@@ -665,7 +665,10 @@ class _AddTaskSheetContentState extends ConsumerState<_AddTaskSheetContent> {
                 padding: EdgeInsets.symmetric(vertical: Gap.sm),
                 child: LinearProgressIndicator(),
               ),
-              error: (e, _) => Text('Could not load projects.', style: Theme.of(context).textTheme.bodyMedium),
+              error: (e, _) => _RetryableLoadError(
+                message: 'Could not load projects.',
+                onRetry: () => ref.invalidate(projectsProvider),
+              ),
             ),
             const SizedBox(height: Gap.md),
 

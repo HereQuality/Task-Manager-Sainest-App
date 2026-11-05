@@ -13,7 +13,9 @@ import '../core/api_client.dart';
 /// consumed by Add Task from any tab, invalidated on logout/session
 /// expiry in auth_provider.dart).
 final assignableEmployeesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
-  final res = await ApiClient.instance.dio.get('/employees/assignable/list');
-  final data = res.data['data'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  return withTransientRetry(() async {
+    final res = await ApiClient.instance.dio.get('/employees/assignable/list');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  });
 });

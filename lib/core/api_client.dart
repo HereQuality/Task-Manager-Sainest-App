@@ -3,6 +3,30 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Retries a failing fetch up to [maxAttempts] times, with a short,
+/// increasing delay between tries, before letting the final failure
+/// propagate. For providers warmed automatically right when a screen
+/// opens (Add Task's Spaces/Employees/Projects pickers, all three firing
+/// in parallel the moment the sheet builds) -- confirmed live that this
+/// exact burst, especially right after a fresh login when several other
+/// things (dashboard stats, the notifications feed, the background
+/// watcher starting up) are also mid-flight, is enough to make one of
+/// them time out or hit a transient server hiccup even though the
+/// account/token/permissions are all fine and a plain manual retry
+/// succeeds a moment later. Auto-retrying here means the person doesn't
+/// have to notice and tap Retry by hand for something that was only ever
+/// going to need a second to resolve itself.
+Future<T> withTransientRetry<T>(Future<T> Function() action, {int maxAttempts = 3}) async {
+  for (var attempt = 1;; attempt++) {
+    try {
+      return await action();
+    } catch (_) {
+      if (attempt >= maxAttempts) rethrow;
+      await Future.delayed(Duration(milliseconds: 400 * attempt));
+    }
+  }
+}
+
 /// Bumped every time a 401 clears the stored token below. ApiClient is a
 /// plain singleton with no Riverpod ref of its own, so this is the same
 /// ValueNotifier-bridge pattern used everywhere else in the app
@@ -88,9 +112,37 @@ class ApiClient {
           // above so AuthState actually flips to unauthenticated -- see
           // that notifier's own doc comment for why deleting the token
           // alone used to leave the app stuck.
+          //
+          // Guarded against the token the FAILING request actually carried
+          // no longer matching the current one -- without this, a single
+          // 401 (even a one-off/transient one from a single endpoint,
+          // unrelated requests meanwhile succeeding fine) clears the token
+          // for the whole app, and then EVERY other request already in
+          // flight or retried right after -- which now has no
+          // Authorization header at all -- also 401s, cascading what
+          // started as one endpoint's problem into "nothing loads
+          // anymore" app-wide. Confirmed live: a single 401 from the
+          // Spaces fetch alone was enough to make the Employees picker's
+          // own retry and the Task detail screen both fail right after,
+          // even though the background watcher's own tasks fetch (a
+          // completely separate request, same token) kept succeeding the
+          // whole time -- proof the token itself was still valid and this
+          // was reacting to one endpoint's own failure as if the whole
+          // session had died. Comparing against the CURRENT cached token
+          // means only a 401 that actually reflects today's real,
+          // currently-in-use token clears it; a stale request's error (or
+          // a second 401 arriving after the first already cleared it)
+          // becomes a no-op instead of re-triggering the same reaction.
           if (error.response?.statusCode == 401) {
-            await clearToken();
-            sessionExpiredNotifier.value++;
+            final failedToken = error.requestOptions.headers['Authorization'] as String?;
+            final currentToken = await readToken();
+            final sentToken = failedToken != null && failedToken.startsWith('Bearer ')
+                ? failedToken.substring(7)
+                : failedToken;
+            if (currentToken != null && sentToken == currentToken) {
+              await clearToken();
+              sessionExpiredNotifier.value++;
+            }
           }
           handler.next(error);
         },

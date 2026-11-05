@@ -17,9 +17,11 @@ import '../core/api_client.dart';
 /// invalidate it, so a different account logging in next never inherits
 /// a previous account's cached list.
 final spacesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
-  final res = await ApiClient.instance.dio.get('/spaces');
-  final data = res.data['data'] ?? [];
-  return List<Map<String, dynamic>>.from(data);
+  return withTransientRetry(() async {
+    final res = await ApiClient.instance.dio.get('/spaces');
+    final data = res.data['data'] ?? [];
+    return List<Map<String, dynamic>>.from(data);
+  });
 });
 
 /// Which (active) Space a given employee currently belongs to -- GET

@@ -395,8 +395,10 @@ Future<void> deleteTaskComment(String taskId, String commentId) async {
 /// or a day's tasks on the Calendar tab).
 final taskDetailProvider = FutureProvider.autoDispose
     .family<Map<String, dynamic>, String>((ref, taskId) async {
-  final res = await ApiClient.instance.dio.get('/tasks/$taskId');
-  return Map<String, dynamic>.from(res.data['data'] ?? {});
+  return withTransientRetry(() async {
+    final res = await ApiClient.instance.dio.get('/tasks/$taskId');
+    return Map<String, dynamic>.from(res.data['data'] ?? {});
+  });
 });
 
 /// Creates a task directly in a Space's own root List -- POST
